@@ -12,6 +12,15 @@ function daysFromNow(days, hourUtc) {
 async function main() {
   const events = [
     {
+      title: "Introduction to Tensor Processing Units (TPUs)",
+      description:
+        "Deepak Singh will introduce Tensor Processing Units, why they matter for modern machine learning workloads, how they differ from GPUs, and when builders should consider using them for training or inference.",
+      location: "Online",
+      startsAt: new Date("2026-06-22T17:30:00.000Z"),
+      endsAt: new Date("2026-06-22T18:30:00.000Z"),
+      published: true,
+    },
+    {
       title: "ShardUp Builders Circle",
       description:
         "A focused evening for members to share what they are building, get feedback, and find collaborators for the next sprint.",
