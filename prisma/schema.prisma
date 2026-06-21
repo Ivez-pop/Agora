@@ -42,8 +42,8 @@ model User {
   application   Application?
   rsvps         EventRsvp[]
   createdEvents Event[]      @relation("EventCreator")
-
   reviewedApplications Application[] @relation("ApplicationReviewer")
+  recommendedResources Resource[]    @relation("ResourceRecommender")
 }
 
 model Account {
@@ -152,4 +152,44 @@ model EventRsvp {
 
   @@unique([eventId, userId])
   @@index([userId])
+}
+
+enum ResourceType {
+  BOOK
+  ARTICLE
+  COURSE
+  VIDEO
+  RESEARCH_PAPER
+}
+
+model Category {
+  id        String     @id @default(cuid())
+  name      String     @unique
+  slug      String     @unique
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  resources Resource[]
+}
+
+model Resource {
+  id                   String       @id @default(cuid())
+  title                String
+  author               String?
+  type                 ResourceType
+  recommendationReason String?
+  resourceLink         String?
+  buyLink              String?
+  imageUrl             String
+  categoryId           String
+  recommendedById      String?
+
+  createdAt            DateTime     @default(now())
+  updatedAt            DateTime     @updatedAt
+
+  category             Category     @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  recommendedBy        User?        @relation("ResourceRecommender", fields: [recommendedById], references: [id], onDelete: SetNull)
+
+  @@index([categoryId])
+  @@index([recommendedById])
 }
