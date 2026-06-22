@@ -1,7 +1,10 @@
 import { notFound } from "next/navigation";
-import { getCategoryBySlug, getResourcesByCategory } from "../../../lib/bookshelf/queries";
+import { getCategoryBySlug, getFilteredCategoryResources } from "../../../lib/bookshelf/queries";
 import CategoryHeader from "../../../components/bookshelf/category-header";
 import ResourceCard from "../../../components/bookshelf/resource-card";
+import BookshelfSearch from "../../../components/bookshelf/bookshelf-search";
+import BookshelfFilters from "../../../components/bookshelf/bookshelf-filters";
+import BookshelfSort from "../../../components/bookshelf/bookshelf-sort";
 
 export const dynamic = "force-dynamic";
 
@@ -9,9 +12,14 @@ interface CategoryPageProps {
   params: {
     category: string;
   };
+  searchParams?: {
+    q?: string;
+    type?: string;
+    sort?: string;
+  };
 }
 
-export default async function CategoryPage({ params }: CategoryPageProps) {
+export default async function CategoryPage({ params, searchParams }: CategoryPageProps) {
   const { category: slug } = params;
 
   const category = await getCategoryBySlug(slug);
@@ -19,40 +27,26 @@ export default async function CategoryPage({ params }: CategoryPageProps) {
     notFound();
   }
 
-  const resources = await getResourcesByCategory(slug);
+  const q = searchParams?.q;
+  const type = searchParams?.type;
+  const sort = searchParams?.sort;
+
+  const isFiltered = Boolean(q || type || sort);
+
+  const resources = await getFilteredCategoryResources(slug, { q, type, sort });
 
   return (
     <main className="app-shell wide-card">
       <section className="app-card">
         <CategoryHeader name={category.name} count={category._count.resources} />
 
-        {/* Filter UI Placeholder - UI Only */}
-        <div className="filter-container" style={{ margin: "24px 0 32px", display: "flex", gap: "16px", flexWrap: "wrap", alignItems: "center" }}>
-          <span style={{ fontWeight: "bold", fontSize: "0.9rem", color: "var(--muted)", textTransform: "uppercase", letterSpacing: "0.05em" }}>
-            Filter by Type:
-          </span>
-          <div style={{ width: "200px" }}>
-            <select
-              disabled
-              style={{
-                width: "100%",
-                padding: "8px 12px",
-                border: "1px solid var(--line)",
-                background: "#fffef8",
-                color: "var(--muted)",
-                cursor: "not-allowed",
-                fontFamily: "var(--font-main)",
-                fontWeight: "bold",
-              }}
-            >
-              <option>All Types</option>
-              <option>Books</option>
-              <option>Articles</option>
-              <option>Courses</option>
-              <option>Videos</option>
-              <option>Research Papers</option>
-            </select>
-          </div>
+        {/* Interactive Search Panel */}
+        <BookshelfSearch />
+
+        {/* Type Filters & Sorting Controls */}
+        <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid var(--line)", paddingBottom: "8px", marginBottom: "28px" }}>
+          <BookshelfFilters />
+          <BookshelfSort />
         </div>
 
         {/* Resources Grid */}
@@ -62,7 +56,9 @@ export default async function CategoryPage({ params }: CategoryPageProps) {
               <ResourceCard key={resource.id} resource={resource} />
             ))
           ) : (
-            <div className="form-message">No resources added in this category yet.</div>
+            <div className="form-message">
+              {isFiltered ? "No resources in this category match your filters." : "No resources added in this category yet."}
+            </div>
           )}
         </div>
 
