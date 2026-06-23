@@ -26,22 +26,39 @@ enum ApplicationStatus {
   REJECTED
 }
 
+enum ProblemDifficulty {
+  EASY
+  MEDIUM
+  HARD
+}
+
+enum SubmissionVerdict {
+  PENDING
+  ACCEPTED
+  WRONG_ANSWER
+  TLE
+  RUNTIME_ERROR
+  COMPILE_ERROR
+}
+
 model User {
-  id            String       @id @default(cuid())
-  name          String?
-  email         String       @unique
-  emailVerified DateTime?
-  image         String?
-  role          Role         @default(MEMBER)
-  status        UserStatus   @default(PENDING)
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
-  accounts      Account[]
-  sessions      Session[]
-  profile       Profile?
-  application   Application?
-  rsvps         EventRsvp[]
-  createdEvents Event[]      @relation("EventCreator")
+  id                   String        @id @default(cuid())
+  name                 String?
+  email                String        @unique
+  emailVerified        DateTime?
+  image                String?
+  role                 Role          @default(MEMBER)
+  status               UserStatus    @default(PENDING)
+  createdAt            DateTime      @default(now())
+  updatedAt            DateTime      @updatedAt
+  accounts             Account[]
+  sessions             Session[]
+  profile              Profile?
+  application          Application?
+  rsvps                EventRsvp[]
+  createdEvents        Event[]       @relation("EventCreator")
+  createdProblems      Problem[]     @relation("ProblemCreator")
+  submissions          Submission[]
   reviewedApplications Application[] @relation("ApplicationReviewer")
   recommendedResources Resource[]    @relation("ResourceRecommender")
 }
@@ -154,6 +171,63 @@ model EventRsvp {
   @@index([userId])
 }
 
+model Problem {
+  id          String            @id @default(cuid())
+  slug        String            @unique
+  title       String
+  statement   String
+  constraints String?
+  tags        String[]          @default([])
+  difficulty  ProblemDifficulty @default(EASY)
+  timeLimitMs Int               @default(2000)
+  published   Boolean           @default(true)
+  createdById String?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  creator     User?        @relation("ProblemCreator", fields: [createdById], references: [id])
+  testCases   TestCase[]
+  submissions Submission[]
+
+  @@index([published, difficulty])
+  @@index([createdById])
+}
+
+model TestCase {
+  id             String   @id @default(cuid())
+  problemId      String
+  input          String
+  expectedOutput String
+  isSample       Boolean  @default(false)
+  order          Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  problem Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@index([problemId, isSample, order])
+}
+
+model Submission {
+  id          String            @id @default(cuid())
+  userId      String
+  problemId   String
+  language    String
+  code        String
+  verdict     SubmissionVerdict @default(PENDING)
+  runtimeMs   Int?
+  passedCount Int               @default(0)
+  totalCount  Int               @default(0)
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  problem Problem @relation(fields: [problemId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([problemId, verdict])
+}
+
 enum ResourceType {
   BOOK
   ARTICLE
@@ -163,11 +237,11 @@ enum ResourceType {
 }
 
 model Category {
-  id        String     @id @default(cuid())
-  name      String     @unique
-  slug      String     @unique
-  createdAt DateTime   @default(now())
-  updatedAt DateTime   @updatedAt
+  id        String   @id @default(cuid())
+  name      String   @unique
+  slug      String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   resources Resource[]
 }
@@ -176,25 +250,23 @@ model Resource {
   id                   String       @id @default(cuid())
   title                String
   author               String?
-  description          String?      // optional future-proofing
   type                 ResourceType
   recommendationReason String?
   resourceLink         String?
   buyLink              String?
-  imageUrl             String?      // changed
+  imageUrl             String
 
-  categoryId           String
-  recommendedById      String?
+  categoryId      String
+  recommendedById String?
 
-  createdAt            DateTime @default(now())
-  updatedAt            DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   category      Category @relation(fields: [categoryId], references: [id], onDelete: Cascade)
   recommendedBy User?    @relation("ResourceRecommender", fields: [recommendedById], references: [id], onDelete: SetNull)
 
+  @@unique([categoryId, title])
   @@index([categoryId])
   @@index([recommendedById])
   @@index([categoryId, type])
-
-  @@unique([categoryId, title])
 }
