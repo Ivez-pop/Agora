@@ -42,6 +42,12 @@ CREATE INDEX "Resource_categoryId_idx" ON "Resource"("categoryId");
 -- CreateIndex
 CREATE INDEX "Resource_recommendedById_idx" ON "Resource"("recommendedById");
 
+-- CreateIndex
+CREATE INDEX "Resource_categoryId_type_idx" ON "Resource"("categoryId", "type");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "Resource_categoryId_title_key" ON "Resource"("categoryId", "title");
+
 -- AddForeignKey
 ALTER TABLE "Resource" ADD CONSTRAINT "Resource_categoryId_fkey" FOREIGN KEY ("categoryId") REFERENCES "Category"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 

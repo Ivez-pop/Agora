@@ -65,7 +65,6 @@ model Account {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@id([provider, providerAccountId])
-  @@index([userId])
 }
 
 model Session {
@@ -75,8 +74,7 @@ model Session {
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-  @@index([userId])
+updatedAt DateTime @updatedAt
 }
 
 model VerificationToken {
@@ -120,7 +118,6 @@ model Application {
   reviewer User? @relation("ApplicationReviewer", fields: [reviewedBy], references: [id])
 
   @@index([status])
-  @@index([reviewedBy])
 }
 
 model Event {
