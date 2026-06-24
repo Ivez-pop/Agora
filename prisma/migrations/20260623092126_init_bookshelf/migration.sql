@@ -19,7 +19,7 @@ CREATE TABLE "Resource" (
     "author" TEXT,
     "type" "ResourceType" NOT NULL,
     "recommendationReason" TEXT,
-    "resourceLink" TEXT,
+    "resourceLink" TEXT NOT NULL,
     "buyLink" TEXT,
     "imageUrl" TEXT,
     "categoryId" TEXT NOT NULL,

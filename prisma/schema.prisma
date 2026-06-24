@@ -260,7 +260,7 @@ model Resource {
   author               String?
   type                 ResourceType
   recommendationReason String?
-  resourceLink         String?
+  resourceLink         String
   buyLink              String?
   imageUrl             String?
 
