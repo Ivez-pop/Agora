@@ -113,7 +113,26 @@ https://your-shardup-domain.com/api/health
 - Keep Piston behind Caddy. Do not expose port `2000` publicly in Oracle ingress rules.
 - Rotate `JUDGE_API_KEY` if it leaks. Update both Caddy and Vercel.
 - Piston runs privileged because upstream Piston uses Isolate/cgroups inside Docker.
+- The ShardUp template builds a tiny local Piston image patch that raises the Express request-body
+  parser limit. This is required for hidden stress tests with large stdin payloads; Caddy proxy
+  settings alone do not fix Piston API body-parser rejections.
 - If package installation fails, SSH into the VM and run the `ppman install` commands manually from `/opt/piston-src/cli`.
+
+## Updating An Existing Judge VM For Stress Tests
+
+If the VM was created before the request-body-limit patch, update `/opt/shardup-judge/docker-compose.yaml`
+to match `infra/oracle-piston-cloud-init.yaml`, add `/opt/shardup-judge/Dockerfile` and
+`/opt/shardup-judge/patch-piston-request-body-limit.js` from that same template, then rebuild:
+
+```bash
+cd /opt/shardup-judge
+sudo docker compose up -d --build
+sudo docker compose logs -f api
+```
+
+Confirm the public judge accepts large stdin by running an execution request whose JSON body is over
+100 KB. If it still fails with HTTP 413 or a body-parser error, the API container was not rebuilt
+from the patched local image.
 
 ## Useful Commands On The VM
 

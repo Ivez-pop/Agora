@@ -20,16 +20,50 @@ write_files:
     content: |
       services:
         api:
-          image: ghcr.io/engineer-man/piston
+          build: .
+          image: shardup-piston:request-body-limit
           container_name: piston_api
           restart: always
           privileged: true
+          environment:
+            PISTON_REQUEST_BODY_LIMIT: 8mb
+            PISTON_OUTPUT_MAX_SIZE: "2000000"
+            PISTON_MAX_FILE_SIZE: "10000000"
+            PISTON_RUN_TIMEOUT: "10000"
+            PISTON_RUN_CPU_TIME: "10000"
           ports:
             - "127.0.0.1:2000:2000"
           volumes:
             - ./data/piston/packages:/piston/packages
           tmpfs:
             - /tmp:exec
+
+  - path: /opt/shardup-judge/Dockerfile
+    permissions: "0644"
+    content: |
+      FROM ghcr.io/engineer-man/piston
+      COPY patch-piston-request-body-limit.js /tmp/patch-piston-request-body-limit.js
+      RUN node /tmp/patch-piston-request-body-limit.js && rm /tmp/patch-piston-request-body-limit.js
+
+  - path: /opt/shardup-judge/patch-piston-request-body-limit.js
+    permissions: "0644"
+    content: |
+      # Upstream Piston exposes file/output/time limits through environment
+      # variables, but its Express body parsers still use body-parser defaults.
+      # The default request limit rejects large stdin payloads before Piston can
+      # run the program, so patch the API parser limit for judge stress tests.
+      const fs = require("node:fs");
+      const file = "/piston_api/src/index.js";
+      let source = fs.readFileSync(file, "utf8");
+      source = source.replace(
+        "app.use(body_parser.urlencoded({ extended: true }));",
+        "app.use(body_parser.urlencoded({ extended: true, limit: process.env.PISTON_REQUEST_BODY_LIMIT || '8mb' }));",
+      );
+      source = source.replace(
+        "app.use(body_parser.json());",
+        "app.use(body_parser.json({ limit: process.env.PISTON_REQUEST_BODY_LIMIT || '8mb' }));",
+      );
+      fs.writeFileSync(file, source);
 
   - path: /etc/caddy/Caddyfile
     permissions: "0644"
@@ -62,7 +96,7 @@ runcmd:
   - ufw allow 80/tcp
   - ufw allow 443/tcp
   - ufw --force enable
-  - cd /opt/shardup-judge && docker compose up -d
+  - cd /opt/shardup-judge && docker compose up -d --build
   - git clone https://github.com/engineer-man/piston.git /opt/piston-src
   - cd /opt/piston-src/cli && npm ci
   - until curl -fsS http://127.0.0.1:2000/api/v2/runtimes >/dev/null; do sleep 2; done
