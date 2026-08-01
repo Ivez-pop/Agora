@@ -59,14 +59,17 @@ export type ContestSubmissionRow = {
   userId: string;
   contestProblemId: string;
   verdict: SubmissionVerdict;
+  passedCount: number;
+  totalCount: number;
   createdAt: Date;
 };
 
 export type StandingRow = {
   userId: string;
+  score: number;
   solvedCount: number;
   penalty: number;
-  lastAcAt: Date | null;
+  lastScoredAt: Date | null;
   rank: number;
 };
 
@@ -192,6 +195,12 @@ function minutesFromStart(startsAt: Date, at: Date) {
   return Math.max(0, Math.floor((at.getTime() - startsAt.getTime()) / 60_000));
 }
 
+function submissionScore(submission: ContestSubmissionRow) {
+  return submission.totalCount > 0
+    ? Math.round((submission.passedCount * 100) / submission.totalCount)
+    : 0;
+}
+
 export function computeStandings(
   submissions: ContestSubmissionRow[],
   startsAt: Date,
@@ -206,36 +215,54 @@ export function computeStandings(
     byUserProblem.set(key, bucket);
   }
 
-  const stats = new Map<string, { solvedCount: number; penalty: number; lastAcAt: Date | null }>();
+  const stats = new Map<
+    string,
+    { score: number; solvedCount: number; penalty: number; lastScoredAt: Date | null }
+  >();
 
   for (const [key, attempts] of Array.from(byUserProblem.entries())) {
     const userId = key.split(":")[0]!;
     const ordered = [...attempts].sort(
       (left, right) => left.createdAt.getTime() - right.createdAt.getTime(),
     );
-    const acceptedIndex = ordered.findIndex(
-      (attempt) => attempt.verdict === SubmissionVerdict.ACCEPTED,
-    );
+    let bestIndex = -1;
+    let bestScore = 0;
+    for (let index = 0; index < ordered.length; index += 1) {
+      const attempt = ordered[index]!;
+      const score = submissionScore(attempt);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = index;
+      }
+    }
 
-    if (acceptedIndex < 0) {
+    if (bestIndex < 0) {
       continue;
     }
 
-    const accepted = ordered[acceptedIndex]!;
+    const bestAttempt = ordered[bestIndex]!;
     const wrongBefore = ordered
-      .slice(0, acceptedIndex)
+      .slice(0, bestIndex)
       .filter((attempt) => attempt.verdict !== SubmissionVerdict.PENDING).length;
     const problemPenalty =
-      minutesFromStart(startTimesByUser.get(userId) ?? startsAt, accepted.createdAt) +
+      minutesFromStart(startTimesByUser.get(userId) ?? startsAt, bestAttempt.createdAt) +
       wrongBefore * CONTEST_WRONG_PENALTY_MINUTES;
 
-    const current = stats.get(userId) ?? { solvedCount: 0, penalty: 0, lastAcAt: null };
-    current.solvedCount += 1;
+    const current = stats.get(userId) ?? {
+      score: 0,
+      solvedCount: 0,
+      penalty: 0,
+      lastScoredAt: null,
+    };
+    current.score += bestScore;
+    if (bestAttempt.verdict === SubmissionVerdict.ACCEPTED) {
+      current.solvedCount += 1;
+    }
     current.penalty += problemPenalty;
-    current.lastAcAt =
-      !current.lastAcAt || accepted.createdAt > current.lastAcAt
-        ? accepted.createdAt
-        : current.lastAcAt;
+    current.lastScoredAt =
+      !current.lastScoredAt || bestAttempt.createdAt > current.lastScoredAt
+        ? bestAttempt.createdAt
+        : current.lastScoredAt;
     stats.set(userId, current);
   }
 
@@ -243,16 +270,18 @@ export function computeStandings(
     .map(([userId, row]) => ({ userId, ...row }))
     .sort(
       (left, right) =>
+        right.score - left.score ||
         right.solvedCount - left.solvedCount ||
         left.penalty - right.penalty ||
-        (left.lastAcAt?.getTime() ?? 0) - (right.lastAcAt?.getTime() ?? 0),
+        (left.lastScoredAt?.getTime() ?? 0) - (right.lastScoredAt?.getTime() ?? 0),
     );
 
   return ranked.map((row, index) => ({
     userId: row.userId,
+    score: row.score,
     solvedCount: row.solvedCount,
     penalty: row.penalty,
-    lastAcAt: row.lastAcAt,
+    lastScoredAt: row.lastScoredAt,
     rank: index + 1,
   }));
 }

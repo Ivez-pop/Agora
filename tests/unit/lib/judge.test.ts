@@ -45,12 +45,14 @@ describe("judgeSubmission", () => {
       passedCount: 2,
       totalCount: 2,
       runtimeMs: 6,
+      failureMessage: null,
     });
   });
 
-  it("returns wrong answer on the first mismatched output", async () => {
+  it("continues after a wrong answer and counts later passing tests", async () => {
+    let execution = 0;
     const executor: CodeExecutor = async () => ({
-      stdout: "0\n",
+      stdout: execution++ === 0 ? "0\n" : "6\n",
       stderr: "",
       exitCode: 0,
       signal: null,
@@ -65,7 +67,11 @@ describe("judgeSubmission", () => {
       timeLimitMs: 2000,
     });
 
-    expect(result).toMatchObject({ verdict: SubmissionVerdict.WRONG_ANSWER, passedCount: 0 });
+    expect(result).toMatchObject({
+      verdict: SubmissionVerdict.WRONG_ANSWER,
+      passedCount: 1,
+      totalCount: 2,
+    });
   });
 
   it("maps compile errors before output comparison", async () => {

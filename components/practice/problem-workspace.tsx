@@ -63,6 +63,11 @@ const starterCode: Record<string, string> = {
 };
 
 function SubmissionMeta({ submission }: Readonly<{ submission: Submission }>) {
+  const score =
+    submission.totalCount > 0
+      ? Math.round((submission.passedCount * 100) / submission.totalCount)
+      : 0;
+
   return (
     <>
       <strong className="verdict-label">
@@ -72,6 +77,7 @@ function SubmissionMeta({ submission }: Readonly<{ submission: Submission }>) {
       <span>
         {submission.passedCount}/{submission.totalCount} tests
       </span>
+      {submission.totalCount > 0 ? <span>{score}/100 points</span> : null}
       <span>{submission.runtimeMs ?? 0}ms</span>
       {submission.note ? <span className="submission-note">{submission.note}</span> : null}
     </>

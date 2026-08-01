@@ -40,7 +40,10 @@ export async function runReferenceSolution(slug: string, language?: string): Pro
         select: { language: true, code: true },
       },
       timeLimitMs: true,
-      testCases: { orderBy: { order: "asc" }, select: { input: true, expectedOutput: true } },
+      testCases: {
+        orderBy: { order: "asc" },
+        select: { input: true, expectedOutput: true },
+      },
     },
   });
 

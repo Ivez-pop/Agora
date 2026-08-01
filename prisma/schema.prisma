@@ -565,6 +565,7 @@ model ContestParticipant {
   userId       String
   rank         Int
   solvedCount  Int
+  score        Int      @default(0)
   penalty      Int
   ratingBefore Int
   ratingAfter  Int
