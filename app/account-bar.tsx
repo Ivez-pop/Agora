@@ -5,6 +5,7 @@ import {
   relativeTimeFromNow,
   unreadNotificationCount,
 } from "../lib/notifications";
+import MessageIndicator from "./message-indicator";
 import NotificationBell, { type NotificationItem } from "./notification-bell";
 import SiteHeader from "./site-header";
 
@@ -46,6 +47,7 @@ export default async function AccountBar({
       >
         <button type="submit">Sign out</button>
       </form>
+      <MessageIndicator userId={session.user.id} />
       <NotificationBell items={notificationItems} unreadCount={unreadCount} />
     </SiteHeader>
   );
