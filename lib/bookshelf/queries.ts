@@ -250,5 +250,3 @@ export async function getRelatedResources(
 
   return [...sameTypeResources, ...categoryResources];
 }
-
-
