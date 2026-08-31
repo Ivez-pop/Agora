@@ -1,6 +1,6 @@
 /* eslint-disable @next/next/no-img-element */
 
-import { Role, UserStatus } from "@prisma/client";
+import { Role, UserStatus } from "@/prisma-client";
 import { auth } from "../../auth";
 import { formatEventListDate } from "../../lib/events";
 import { prisma } from "../../lib/prisma";
@@ -51,7 +51,7 @@ export default async function EventsPage({
             <a className="button" href="#create-event">
               Add event
             </a>
-            <CreateEventModal error={searchParams?.error} returnTo="/events" />
+            <CreateEventModal returnTo="/events" />
           </>
         ) : null}
 

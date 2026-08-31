@@ -1,10 +1,12 @@
 "use server";
 
-import { NudgeStatus, UserStatus } from "@prisma/client";
+import { NudgeStatus, UserStatus } from "@/prisma-client";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { requireActiveUser } from "../../lib/guards";
+import { memberDisplayName } from "../../lib/members";
+import { createNotification, nudgeReceivedMessage } from "../../lib/notifications";
 import { nudgeSchema } from "../../lib/nudges";
 import { prisma } from "../../lib/prisma";
 
@@ -12,10 +14,7 @@ const nudgeIdSchema = z.object({
   nudgeId: z.string().trim().min(1),
 });
 
-function redirectWithError(returnTo: string, error: string): never {
-  const separator = returnTo.includes("?") ? "&" : "?";
-  redirect(`${returnTo}${separator}error=${error}`);
-}
+export type SendNudgeState = { ok: boolean; error?: string };
 
 async function getActiveRecipient(recipientId: string) {
   return prisma.user.findFirst({
@@ -34,9 +33,14 @@ function revalidateNudgeProfiles(senderId: string, recipientId: string) {
   revalidatePath("/nudges");
 }
 
-export async function sendNudge(formData: FormData) {
+// Returns a result state (instead of redirecting) so the client modal can close
+// itself on success — a server-action redirect can't update the URL hash that the
+// :target modal relies on, which left the dialog stuck open.
+export async function sendNudge(
+  _prevState: SendNudgeState,
+  formData: FormData,
+): Promise<SendNudgeState> {
   const user = await requireActiveUser();
-  const returnTo = String(formData.get("returnTo") ?? profileNudgesPath(user.id));
 
   const parsed = nudgeSchema.safeParse({
     recipientId: formData.get("recipientId"),
@@ -46,19 +50,19 @@ export async function sendNudge(formData: FormData) {
   });
 
   if (!parsed.success) {
-    redirectWithError(returnTo, "invalid");
+    return { ok: false, error: "invalid" };
   }
 
   const data = parsed.data;
 
   if (data.recipientId === user.id) {
-    redirectWithError(returnTo, "self");
+    return { ok: false, error: "self" };
   }
 
   const recipient = await getActiveRecipient(data.recipientId);
 
   if (!recipient) {
-    redirectWithError(returnTo, "recipient");
+    return { ok: false, error: "recipient" };
   }
 
   await prisma.nudge.create({
@@ -72,8 +76,28 @@ export async function sendNudge(formData: FormData) {
     },
   });
 
+  const sender = await prisma.user.findUnique({
+    where: { id: user.id },
+    select: {
+      name: true,
+      email: true,
+      profile: { select: { displayName: true } },
+    },
+  });
+
+  await createNotification({
+    type: "NUDGE_RECEIVED",
+    actorId: user.id,
+    recipientId: recipient.id,
+    message: nudgeReceivedMessage(
+      sender ? memberDisplayName(sender) : "A ShardUp member",
+      data.title,
+    ),
+    link: `/members/${recipient.id}#nudges`,
+  });
+
   revalidateNudgeProfiles(user.id, recipient.id);
-  redirect(returnTo);
+  return { ok: true };
 }
 
 export async function acceptNudge(formData: FormData) {
@@ -129,13 +153,7 @@ export async function declineNudge(formData: FormData) {
     redirect(profileNudgesPath(user.id));
   }
 
-  await prisma.nudge.update({
-    where: { id: nudge.id },
-    data: {
-      status: NudgeStatus.DECLINED,
-      acceptedAt: new Date(),
-    },
-  });
+  await prisma.nudge.delete({ where: { id: nudge.id } });
 
   revalidateNudgeProfiles(nudge.senderId, nudge.recipientId);
 }
@@ -161,14 +179,15 @@ export async function completeNudge(formData: FormData) {
     redirect(profileNudgesPath(user.id));
   }
 
-  await prisma.nudge.update({
-    where: { id: nudge.id },
-    data: {
-      status: NudgeStatus.COMPLETED,
-      completedAt: new Date(),
-      completedById: user.id,
-    },
-  });
+  // Credit the recipient (the challenged solver) before removing the nudge.
+  await prisma.$transaction([
+    prisma.nudge.delete({ where: { id: nudge.id } }),
+    prisma.profile.upsert({
+      where: { userId: nudge.recipientId },
+      update: { nudgesCompleted: { increment: 1 } },
+      create: { userId: nudge.recipientId, nudgesCompleted: 1 },
+    }),
+  ]);
 
   revalidateNudgeProfiles(nudge.senderId, nudge.recipientId);
 }
@@ -194,10 +213,7 @@ export async function cancelNudge(formData: FormData) {
     redirect(profileNudgesPath(user.id));
   }
 
-  await prisma.nudge.update({
-    where: { id: nudge.id },
-    data: { status: NudgeStatus.CANCELLED },
-  });
+  await prisma.nudge.delete({ where: { id: nudge.id } });
 
   revalidateNudgeProfiles(nudge.senderId, nudge.recipientId);
 }

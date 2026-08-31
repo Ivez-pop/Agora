@@ -1,6 +1,6 @@
-import { SubmissionVerdict } from "@prisma/client";
+import { SubmissionVerdict } from "@/prisma-client";
 import { auth } from "../../auth";
-import { rankPracticeUsers } from "../../lib/practice";
+import { groupProblemsByWeek, rankPracticeUsers } from "../../lib/practice";
 import { prisma } from "../../lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -26,6 +26,7 @@ export default async function ProblemsPage() {
       title: true,
       tags: true,
       difficulty: true,
+      contestProblems: { select: { contestId: true }, take: 1 },
     },
   });
   const acceptedSubmissions = await prisma.submission.findMany({
@@ -70,11 +71,11 @@ export default async function ProblemsPage() {
     },
   });
   const leaderboard = rankPracticeUsers(rankedSubmissions, users).slice(0, 10);
-  const warmupProblem = problems.find((problem) => problem.slug === WARMUP_PROBLEM_SLUG);
-  const sheetProblems = [
-    ...(warmupProblem ? [warmupProblem] : []),
-    ...problems.filter((problem) => problem.slug !== WARMUP_PROBLEM_SLUG),
-  ];
+  const isContestProblem = (problem: (typeof problems)[number]) =>
+    problem.contestProblems.length > 0 || problem.tags.includes("Contest");
+  const contestProblems = problems.filter(isContestProblem);
+  const weekProblems = problems.filter((problem) => !isContestProblem(problem));
+  const weeks = groupProblemsByWeek(weekProblems);
 
   return (
     <main className="app-shell wide-card workspace-shell">
@@ -102,42 +103,56 @@ export default async function ProblemsPage() {
           )}
         </section>
 
-        <div className="problem-list">
-          {sheetProblems.length > 0 ? (
-            sheetProblems.map((problem) => (
-              <a
-                className={[
-                  "problem-row",
-                  problem.slug === WARMUP_PROBLEM_SLUG && "pinned-problem",
-                  solvedProblemIds.has(problem.id) && "solved",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                href={`/problems/${problem.slug}`}
-                key={problem.slug}
-              >
-                <span className="problem-row-title">
-                  {problem.slug === WARMUP_PROBLEM_SLUG ? (
-                    <span aria-label="Pinned">📌</span>
-                  ) : null}
-                  {problem.title}
-                </span>
-                <div className="problem-row-meta">
-                  <span className={`difficulty-pill ${problem.difficulty.toLowerCase()}`}>
-                    {difficultyLabels[problem.difficulty]}
-                  </span>
-                  {problem.tags.slice(0, 2).map((tag) => (
-                    <span key={tag}>{tag}</span>
-                  ))}
-                  <span>{acceptedCounts[problem.id] ?? 0} accepted</span>
-                </div>
-              </a>
-            ))
-          ) : (
+        {weeks.length > 0 ? (
+          weeks.map(({ week, problems: weekList }) => (
+            <section className="practice-week" key={week}>
+              <h2 className="practice-week-header">Week {week}</h2>
+              <div className="problem-list">{weekList.map(renderProblemRow)}</div>
+            </section>
+          ))
+        ) : (
+          <div className="problem-list">
             <div className="form-message">No practice problems are published yet.</div>
-          )}
-        </div>
+          </div>
+        )}
+
+        {contestProblems.length > 0 ? (
+          <section className="practice-week">
+            <h2 className="practice-week-header">Contest Questions</h2>
+            <div className="problem-list">{contestProblems.map(renderProblemRow)}</div>
+          </section>
+        ) : null}
       </section>
     </main>
   );
+
+  function renderProblemRow(problem: (typeof problems)[number]) {
+    return (
+      <a
+        className={[
+          "problem-row",
+          problem.slug === WARMUP_PROBLEM_SLUG && "pinned-problem",
+          solvedProblemIds.has(problem.id) && "solved",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        href={`/problems/${problem.slug}`}
+        key={problem.slug}
+      >
+        <span className="problem-row-title">
+          {problem.slug === WARMUP_PROBLEM_SLUG ? <span aria-label="Pinned">📌</span> : null}
+          {problem.title}
+        </span>
+        <div className="problem-row-meta">
+          <span className={`difficulty-pill ${problem.difficulty.toLowerCase()}`}>
+            {difficultyLabels[problem.difficulty]}
+          </span>
+          {problem.tags.slice(0, 2).map((tag) => (
+            <span key={tag}>{tag}</span>
+          ))}
+          <span>{acceptedCounts[problem.id] ?? 0} accepted</span>
+        </div>
+      </a>
+    );
+  }
 }

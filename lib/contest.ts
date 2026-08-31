@@ -1,18 +1,54 @@
-import { ContestStatus, SubmissionVerdict } from "@prisma/client";
+import { ContestStatus, SubmissionVerdict } from "@/prisma-client";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { memberDisplayName } from "./members";
 import { prisma } from "./prisma";
 
-export const DEFAULT_CONTEST_RATING = 1500;
-export const CONTEST_WRONG_PENALTY_MINUTES = 20;
+export const DEFAULT_CONTEST_RATING = 1000;
+// LeetCode-style: each wrong submission on a solved problem adds 5 minutes.
+export const CONTEST_WRONG_PENALTY_MINUTES = 5;
 
 export const RATING_TIER_BADGES = [
-  { name: "Contest Newbie", minRating: 0, maxRating: 1199 },
-  { name: "Contest Pupil", minRating: 1200, maxRating: 1399 },
-  { name: "Contest Specialist", minRating: 1400, maxRating: 1599 },
-  { name: "Contest Expert", minRating: 1600, maxRating: 1899 },
-  { name: "Contest Candidate Master", minRating: 1900, maxRating: Number.POSITIVE_INFINITY },
+  {
+    name: "Rough Shard",
+    label: "Rough",
+    slug: "rough",
+    color: "#6b7280",
+    minRating: 0,
+    maxRating: 1099,
+  },
+  {
+    name: "Cut Shard",
+    label: "Cut",
+    slug: "cut",
+    color: "#2f9e44",
+    minRating: 1100,
+    maxRating: 1249,
+  },
+  {
+    name: "Polished Shard",
+    label: "Polished",
+    slug: "polished",
+    color: "#1971c2",
+    minRating: 1250,
+    maxRating: 1399,
+  },
+  {
+    name: "Radiant Shard",
+    label: "Radiant",
+    slug: "radiant",
+    color: "#7048e8",
+    minRating: 1400,
+    maxRating: 1599,
+  },
+  {
+    name: "Molten Shard",
+    label: "Molten",
+    slug: "molten",
+    color: "#e8590c",
+    minRating: 1600,
+    maxRating: Number.POSITIVE_INFINITY,
+  },
 ] as const;
 
 export const AUTO_ASSIGNED_BADGE_NAMES = new Set<string>(
@@ -23,14 +59,17 @@ export type ContestSubmissionRow = {
   userId: string;
   contestProblemId: string;
   verdict: SubmissionVerdict;
+  passedCount: number;
+  totalCount: number;
   createdAt: Date;
 };
 
 export type StandingRow = {
   userId: string;
+  score: number;
   solvedCount: number;
   penalty: number;
-  lastAcAt: Date | null;
+  lastScoredAt: Date | null;
   rank: number;
 };
 
@@ -120,9 +159,21 @@ export function contestDurationMinutes(contest: {
   );
 }
 
+// The personal timer starts when the member registered, but never before the
+// contest itself opens. So a member who registers early (LeetCode style) starts
+// the moment the contest goes live, while someone who joins mid-window starts
+// from their join time. Either way the window is capped at the contest's endsAt.
+export function personalContestStart(contest: ContestTiming, registrationStartedAt?: Date | null) {
+  if (!registrationStartedAt) {
+    return contest.startsAt;
+  }
+
+  return registrationStartedAt > contest.startsAt ? registrationStartedAt : contest.startsAt;
+}
+
 export function contestWindowForUser(contest: ContestTiming, registrationStartedAt?: Date | null) {
   if (registrationStartedAt) {
-    const startsAt = registrationStartedAt;
+    const startsAt = personalContestStart(contest, registrationStartedAt);
     const personalEnd = new Date(startsAt.getTime() + contestDurationMinutes(contest) * 60_000);
     const endsAt = personalEnd < contest.endsAt ? personalEnd : contest.endsAt;
 
@@ -144,6 +195,12 @@ function minutesFromStart(startsAt: Date, at: Date) {
   return Math.max(0, Math.floor((at.getTime() - startsAt.getTime()) / 60_000));
 }
 
+function submissionScore(submission: ContestSubmissionRow) {
+  return submission.totalCount > 0
+    ? Math.round((submission.passedCount * 100) / submission.totalCount)
+    : 0;
+}
+
 export function computeStandings(
   submissions: ContestSubmissionRow[],
   startsAt: Date,
@@ -158,36 +215,54 @@ export function computeStandings(
     byUserProblem.set(key, bucket);
   }
 
-  const stats = new Map<string, { solvedCount: number; penalty: number; lastAcAt: Date | null }>();
+  const stats = new Map<
+    string,
+    { score: number; solvedCount: number; penalty: number; lastScoredAt: Date | null }
+  >();
 
   for (const [key, attempts] of Array.from(byUserProblem.entries())) {
     const userId = key.split(":")[0]!;
     const ordered = [...attempts].sort(
       (left, right) => left.createdAt.getTime() - right.createdAt.getTime(),
     );
-    const acceptedIndex = ordered.findIndex(
-      (attempt) => attempt.verdict === SubmissionVerdict.ACCEPTED,
-    );
+    let bestIndex = -1;
+    let bestScore = 0;
+    for (let index = 0; index < ordered.length; index += 1) {
+      const attempt = ordered[index]!;
+      const score = submissionScore(attempt);
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = index;
+      }
+    }
 
-    if (acceptedIndex < 0) {
+    if (bestIndex < 0) {
       continue;
     }
 
-    const accepted = ordered[acceptedIndex]!;
+    const bestAttempt = ordered[bestIndex]!;
     const wrongBefore = ordered
-      .slice(0, acceptedIndex)
+      .slice(0, bestIndex)
       .filter((attempt) => attempt.verdict !== SubmissionVerdict.PENDING).length;
     const problemPenalty =
-      minutesFromStart(startTimesByUser.get(userId) ?? startsAt, accepted.createdAt) +
+      minutesFromStart(startTimesByUser.get(userId) ?? startsAt, bestAttempt.createdAt) +
       wrongBefore * CONTEST_WRONG_PENALTY_MINUTES;
 
-    const current = stats.get(userId) ?? { solvedCount: 0, penalty: 0, lastAcAt: null };
-    current.solvedCount += 1;
+    const current = stats.get(userId) ?? {
+      score: 0,
+      solvedCount: 0,
+      penalty: 0,
+      lastScoredAt: null,
+    };
+    current.score += bestScore;
+    if (bestAttempt.verdict === SubmissionVerdict.ACCEPTED) {
+      current.solvedCount += 1;
+    }
     current.penalty += problemPenalty;
-    current.lastAcAt =
-      !current.lastAcAt || accepted.createdAt > current.lastAcAt
-        ? accepted.createdAt
-        : current.lastAcAt;
+    current.lastScoredAt =
+      !current.lastScoredAt || bestAttempt.createdAt > current.lastScoredAt
+        ? bestAttempt.createdAt
+        : current.lastScoredAt;
     stats.set(userId, current);
   }
 
@@ -195,16 +270,18 @@ export function computeStandings(
     .map(([userId, row]) => ({ userId, ...row }))
     .sort(
       (left, right) =>
+        right.score - left.score ||
         right.solvedCount - left.solvedCount ||
         left.penalty - right.penalty ||
-        (left.lastAcAt?.getTime() ?? 0) - (right.lastAcAt?.getTime() ?? 0),
+        (left.lastScoredAt?.getTime() ?? 0) - (right.lastScoredAt?.getTime() ?? 0),
     );
 
   return ranked.map((row, index) => ({
     userId: row.userId,
+    score: row.score,
     solvedCount: row.solvedCount,
     penalty: row.penalty,
-    lastAcAt: row.lastAcAt,
+    lastScoredAt: row.lastScoredAt,
     rank: index + 1,
   }));
 }
@@ -220,7 +297,7 @@ export function computeRatingChanges(participants: RatingParticipant[]): RatingC
     return [{ userId: only.userId, delta: 0, newRating: only.rating }];
   }
 
-  const K = 32;
+  const K = 64;
 
   const changes = participants.map((participant) => {
     let expected = 0;
@@ -252,11 +329,18 @@ export function computeRatingChanges(participants: RatingParticipant[]): RatingC
   const totalDelta = changes.reduce((sum, change) => sum + change.delta, 0);
   const adjust = -Math.round(totalDelta / participants.length);
 
-  return changes.map((change) => ({
-    ...change,
-    delta: change.delta + adjust,
-    newRating: change.newRating + adjust,
-  }));
+  return changes.map((change) => {
+    // Ratings never drop below 0 (the floor of the Rough tier). Recompute the
+    // delta from the clamped rating so it stays consistent with newRating.
+    const baseRating = change.newRating - change.delta;
+    const newRating = Math.max(0, change.newRating + adjust);
+
+    return {
+      userId: change.userId,
+      delta: newRating - baseRating,
+      newRating,
+    };
+  });
 }
 
 type ContestUser = {
@@ -321,12 +405,42 @@ export function formatContestWindow(startsAt: Date, endsAt: Date) {
   return `${formatter.format(startsAt)} – ${formatter.format(endsAt)} IST`;
 }
 
+export function formatContestInstant(date: Date) {
+  const formatter = new Intl.DateTimeFormat("en", {
+    dateStyle: "medium",
+    timeStyle: "short",
+    timeZone: "Asia/Kolkata",
+  });
+
+  return `${formatter.format(date)} IST`;
+}
+
+// A start-anytime contest exposes a window much larger than the personal timer
+// (e.g. the Demo Contest runs for years). A scheduled contest's window matches
+// its duration, so everyone effectively begins at startsAt.
+export function isStartAnytimeContest(contest: {
+  startsAt: Date;
+  endsAt: Date;
+  durationMinutes?: number | null;
+}) {
+  const windowMs = contest.endsAt.getTime() - contest.startsAt.getTime();
+  const durationMs = contestDurationMinutes(contest) * 60_000;
+
+  return windowMs > durationMs + 60_000;
+}
+
 export function formatContestTiming(contest: {
   startsAt: Date;
   endsAt: Date;
   durationMinutes?: number | null;
 }) {
-  return `${contestDurationMinutes(contest)}-minute contest · start anytime`;
+  const duration = contestDurationMinutes(contest);
+
+  if (isStartAnytimeContest(contest)) {
+    return `${duration}-minute contest · start anytime`;
+  }
+
+  return `${duration}-minute contest · starts ${formatContestInstant(contest.startsAt)}`;
 }
 
 export function toContestInputValue(date: Date) {

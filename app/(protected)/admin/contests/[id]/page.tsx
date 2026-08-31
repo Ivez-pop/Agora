@@ -1,4 +1,4 @@
-import { ContestStatus } from "@prisma/client";
+import { ContestStatus } from "@/prisma-client";
 import { notFound } from "next/navigation";
 import { contestPhase, formatContestTiming, toContestInputValue } from "../../../../../lib/contest";
 import { requireAdmin } from "../../../../../lib/guards";
@@ -72,6 +72,12 @@ export default async function AdminContestDetailPage({
                 Finalize ratings
               </button>
             </form>
+          ) : null}
+          {canFinalize ? (
+            <p className="nudge-meta">
+              Finalizing computes ratings and releases this contest&apos;s problems to the Practice
+              tab.
+            </p>
           ) : null}
           {contest.status !== ContestStatus.DRAFT ? (
             <a className="text-link" href={`/contests/${contest.slug}`}>

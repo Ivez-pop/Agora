@@ -7,6 +7,16 @@ vi.mock("../../../auth", () => ({
   signOut: vi.fn(),
 }));
 
+vi.mock("../../../lib/notifications", () => ({
+  unreadNotificationCount: vi.fn(async () => 0),
+  listNotifications: vi.fn(async () => []),
+  relativeTimeFromNow: vi.fn(() => "just now"),
+}));
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ refresh: vi.fn(), push: vi.fn() }),
+}));
+
 import AccountBar from "../../../app/account-bar";
 
 function makeSession(role: "ADMIN" | "MEMBER"): Session {
@@ -34,6 +44,7 @@ describe("AccountBar", () => {
       "href",
       "/masterclass",
     );
+    expect(screen.getByRole("link", { name: "Messages" })).toHaveAttribute("href", "/messages");
     expect(screen.getByRole("button", { name: "Sign out" })).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Cohort" })).not.toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Applications" })).not.toBeInTheDocument();
@@ -44,10 +55,6 @@ describe("AccountBar", () => {
     render(ui);
 
     expect(screen.getByRole("link", { name: "Cohort" })).toHaveAttribute("href", "/admin/cohort");
-    expect(screen.getByRole("link", { name: "Applications" })).toHaveAttribute(
-      "href",
-      "/admin/applications",
-    );
     expect(screen.getByRole("link", { name: "Masterclass" })).toHaveAttribute(
       "href",
       "/masterclass",

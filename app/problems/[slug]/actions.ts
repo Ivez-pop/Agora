@@ -1,17 +1,27 @@
 "use server";
 
-import { SubmissionVerdict } from "@prisma/client";
+import { SubmissionVerdict } from "@/prisma-client";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { requireActiveUser } from "../../../lib/guards";
 import { isSupportedLanguage, runJudge } from "../../../lib/judge";
+import { memberDisplayName } from "../../../lib/members";
+import { createNotification, practiceSolvedMessage } from "../../../lib/notifications";
 import { syncTopPracticeBadge } from "../../../lib/practice";
 import { prisma } from "../../../lib/prisma";
 
 const DAILY_SUBMISSION_LIMIT = 50;
 const MAX_CODE_LENGTH = 20_000;
 const FAILURE_MESSAGE_LIMIT = 4_000;
+
+type RunResult = {
+  verdict: string;
+  passedCount: number;
+  totalCount: number;
+  runtimeMs: number | null;
+  failureMessage?: string | null;
+};
 
 const submissionSchema = z.object({
   problemSlug: z.string().trim().min(1),
@@ -25,6 +35,16 @@ function failureMessageFromError(error: unknown) {
       ? error.message
       : "Judge service failed before the submission could complete.";
   return message.replace(/\s+/g, " ").trim().slice(0, FAILURE_MESSAGE_LIMIT);
+}
+
+function runError(message: string): RunResult {
+  return {
+    verdict: SubmissionVerdict.RUNTIME_ERROR,
+    passedCount: 0,
+    totalCount: 0,
+    runtimeMs: null,
+    failureMessage: message,
+  };
 }
 
 export async function submitSolution(formData: FormData) {
@@ -48,6 +68,7 @@ export async function submitSolution(formData: FormData) {
     select: {
       id: true,
       slug: true,
+      title: true,
       timeLimitMs: true,
       testCases: {
         orderBy: { order: "asc" },
@@ -94,6 +115,36 @@ export async function submitSolution(formData: FormData) {
     });
 
     if (result.verdict === SubmissionVerdict.ACCEPTED) {
+      const priorAccepted = await prisma.submission.count({
+        where: {
+          userId: user.id,
+          problemId: problem.id,
+          verdict: SubmissionVerdict.ACCEPTED,
+          id: { not: submission.id },
+        },
+      });
+
+      if (priorAccepted === 0) {
+        const actor = await prisma.user.findUnique({
+          where: { id: user.id },
+          select: {
+            name: true,
+            email: true,
+            profile: { select: { displayName: true } },
+          },
+        });
+
+        await createNotification({
+          type: "PRACTICE_SOLVED",
+          actorId: user.id,
+          message: practiceSolvedMessage(
+            actor ? memberDisplayName(actor) : "A ShardUp member",
+            problem.title,
+          ),
+          link: `/problems/${problem.slug}`,
+        });
+      }
+
       await syncTopPracticeBadge();
     }
   } catch (error) {
@@ -110,4 +161,56 @@ export async function submitSolution(formData: FormData) {
 
   revalidatePath("/problems");
   revalidatePath(`/problems/${problem.slug}`);
+}
+
+// Run the member's code against the sample tests only, without persisting a
+// submission. Lets members catch compile errors and check sample output before
+// committing to a real submission (which counts toward stats and rate limits).
+export async function runSolution(formData: FormData): Promise<RunResult> {
+  await requireActiveUser();
+  const parsed = submissionSchema.safeParse({
+    problemSlug: formData.get("problemSlug"),
+    language: formData.get("language"),
+    code: formData.get("code"),
+  });
+
+  if (!parsed.success || !isSupportedLanguage(parsed.data.language)) {
+    return runError("Unsupported language or invalid request.");
+  }
+  if (parsed.data.code.trim().length === 0) {
+    return runError("Write some code before running.");
+  }
+
+  const problem = await prisma.problem.findFirst({
+    where: { slug: parsed.data.problemSlug, published: true },
+    select: {
+      timeLimitMs: true,
+      testCases: {
+        where: { isSample: true },
+        orderBy: { order: "asc" },
+        select: { input: true, expectedOutput: true, isSample: true },
+      },
+    },
+  });
+
+  if (!problem || problem.testCases.length === 0) {
+    return runError("This problem has no sample tests to run against.");
+  }
+
+  try {
+    return await runJudge({
+      code: parsed.data.code,
+      language: parsed.data.language,
+      testCases: problem.testCases,
+      timeLimitMs: problem.timeLimitMs,
+    });
+  } catch (error) {
+    return {
+      verdict: SubmissionVerdict.RUNTIME_ERROR,
+      passedCount: 0,
+      totalCount: problem.testCases.length,
+      runtimeMs: null,
+      failureMessage: failureMessageFromError(error),
+    };
+  }
 }

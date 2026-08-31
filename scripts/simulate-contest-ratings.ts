@@ -3,7 +3,7 @@
  * Run: npx tsx scripts/simulate-contest-ratings.ts
  * With DB: DATABASE_URL=... npx tsx scripts/simulate-contest-ratings.ts --db
  */
-import { ContestStatus, Role, SubmissionVerdict, UserStatus } from "@prisma/client";
+import { ContestStatus, Role, SubmissionVerdict, UserStatus } from "../lib/generated/prisma/client";
 import {
   computeRatingChanges,
   computeStandings,
@@ -36,7 +36,15 @@ function sub(
   verdict: SubmissionVerdict,
   minutes: number,
 ): ContestSubmissionRow {
-  return { userId, contestProblemId, verdict, createdAt: at(minutes) };
+  const accepted = verdict === SubmissionVerdict.ACCEPTED;
+  return {
+    userId,
+    contestProblemId,
+    verdict,
+    passedCount: accepted ? 1 : 0,
+    totalCount: 1,
+    createdAt: at(minutes),
+  };
 }
 
 /** Scripted contest: Alice solves both (with a WA on B), Bob solves A fast, Cara solves B after WA, Dan DNF. */
@@ -96,7 +104,7 @@ function simulatePure() {
   const changes = computeRatingChanges(ratingParticipants);
   const changeByUser = new Map(changes.map((c) => [c.userId, c]));
 
-  console.log("\nRating changes (all start at 1500):");
+  console.log(`\nRating changes (all start at ${DEFAULT_CONTEST_RATING}):`);
   printTable(
     ["Name", "Rank", "Before", "Delta", "After", "Tier"],
     registeredIds.map((userId) => {
@@ -108,7 +116,7 @@ function simulatePure() {
         String(change.newRating - change.delta),
         change.delta >= 0 ? `+${change.delta}` : String(change.delta),
         String(change.newRating),
-        tierForRating(change.newRating).name,
+        tierForRating(change.newRating).label,
       ];
     }),
   );

@@ -1,10 +1,13 @@
 generator client {
-  provider = "prisma-client-js"
+  provider            = "prisma-client"
+  output              = "../lib/generated/prisma"
+  runtime             = "nodejs"
+  moduleFormat        = "esm"
+  importFileExtension = "ts"
 }
 
 datasource db {
   provider = "postgresql"
-  url      = env("DATABASE_URL")
 }
 
 enum Role {
@@ -62,39 +65,83 @@ enum ContestStatus {
   FINALIZED
 }
 
-model User {
-  id                   String        @id @default(cuid())
-  name                 String?
-  email                String        @unique
-  emailVerified        DateTime?
-  image                String?
-  role                 Role          @default(MEMBER)
-  status               UserStatus    @default(PENDING)
-  createdAt            DateTime      @default(now())
-  updatedAt            DateTime      @updatedAt
-  accounts             Account[]
-  sessions             Session[]
-  profile              Profile?
-  application          Application?
-  rsvps                EventRsvp[]
-  createdEvents        Event[]       @relation("EventCreator")
-  createdProblems      Problem[]     @relation("ProblemCreator")
-  submissions          Submission[]
-  teachingSessions     TeachingSession[] @relation("TeachingCreator")
-  memberBadges         MemberBadge[] @relation("MemberBadgeUser")
-  awardedBadges        MemberBadge[] @relation("MemberBadgeAwarder")
-  sentNudges           Nudge[]       @relation("NudgeSender")
-  receivedNudges       Nudge[]       @relation("NudgeRecipient")
-  completedNudges      Nudge[]       @relation("NudgeCompleter")
+enum NotificationType {
+  PRACTICE_SOLVED
+  RANK_UP
+  BADGE_EARNED
+  CONTEST_FINISHED
+  CONTEST_PUBLISHED
+  EVENT_PUBLISHED
+  OVERALL_RANK_UP
+  NUDGE_RECEIVED
+}
 
-  boards                Board[]
-  createdContests       Contest[]             @relation("ContestCreator")
-  contestRegistrations  ContestRegistration[]
-  contestSubmissions    ContestSubmission[]
+enum ChatConversationType {
+  DIRECT
+  GROUP
+}
+
+enum ChatMemberRole {
+  OWNER
+  MEMBER
+}
+
+enum ChatReportStatus {
+  OPEN
+  RESOLVED
+  DISMISSED
+}
+
+enum ChatRateLimitScope {
+  MESSAGE_SEND
+  CONVERSATION_CREATE
+}
+
+model User {
+  id            String       @id @default(cuid())
+  name          String?
+  email         String       @unique
+  emailVerified DateTime?
+  image         String?
+  role          Role         @default(MEMBER)
+  status        UserStatus   @default(PENDING)
+  notificationsSeenAt DateTime?
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  accounts      Account[]
+  sessions      Session[]
+  profile       Profile?
+  application   Application?
+  rsvps         EventRsvp[]
+  createdEvents Event[]      @relation("EventCreator")
+  createdProblems Problem[]   @relation("ProblemCreator")
+  submissions   Submission[]
+  teachingSessions TeachingSession[] @relation("TeachingCreator")
+  memberBadges  MemberBadge[] @relation("MemberBadgeUser")
+  awardedBadges MemberBadge[] @relation("MemberBadgeAwarder")
+  sentNudges      Nudge[] @relation("NudgeSender")
+  receivedNudges  Nudge[] @relation("NudgeRecipient")
+  completedNudges Nudge[] @relation("NudgeCompleter")
+
+  boards Board[]
+  createdContests Contest[] @relation("ContestCreator")
+  contestRegistrations ContestRegistration[]
+  contestSubmissions ContestSubmission[]
   contestParticipations ContestParticipant[]
 
   reviewedApplications Application[] @relation("ApplicationReviewer")
   recommendedResources Resource[]    @relation("ResourceRecommender")
+  notifications Notification[] @relation("NotificationActor")
+  receivedNotifications Notification[] @relation("NotificationRecipient")
+  createdChatConversations ChatConversation[] @relation("ChatConversationCreator")
+  chatMemberships ChatMember[]
+  sentPendingChatMessages PendingChatMessage[] @relation("PendingChatMessageSender")
+  chatDeliveries ChatDelivery[] @relation("ChatDeliveryRecipient")
+  chatSendReceipts ChatSendReceipt[] @relation("ChatSendReceiptSender")
+  chatReports ChatReport[] @relation("ChatReportReporter")
+  reportedChatMessages ChatReport[] @relation("ChatReportSender")
+  resolvedChatReports ChatReport[] @relation("ChatReportResolver")
+  chatRateLimits ChatRateLimit[]
 }
 
 // The yearly application round. One cohort is active at a time; admins edit its
@@ -138,7 +185,7 @@ model Session {
   user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   createdAt DateTime @default(now())
-updatedAt DateTime @updatedAt
+  updatedAt DateTime @updatedAt
 }
 
 model VerificationToken {
@@ -163,7 +210,8 @@ model Profile {
   leetcodeHandle String?
   resumeUrl      String?
   photoUrl       String?
-  contestRating  Int      @default(1500)
+  contestRating  Int      @default(1000)
+  nudgesCompleted Int     @default(0)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -233,10 +281,12 @@ model Event {
   endsAt      DateTime?
   published   Boolean  @default(true)
   createdById String?
+  contestId   String?  @unique
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
   creator User?       @relation("EventCreator", fields: [createdById], references: [id])
+  contest Contest?    @relation("ContestEvent", fields: [contestId], references: [id], onDelete: Cascade)
   rsvps   EventRsvp[]
 
   @@index([published, startsAt])
@@ -473,6 +523,7 @@ model Contest {
   updatedAt   DateTime      @updatedAt
 
   creator       User?                 @relation("ContestCreator", fields: [createdById], references: [id])
+  event         Event?                @relation("ContestEvent")
   problems      ContestProblem[]
   registrations ContestRegistration[]
   submissions   ContestSubmission[]
@@ -498,6 +549,10 @@ model ContestProblem {
   @@index([contestId, order])
 }
 
+// A member's sign-up for a contest (LeetCode style: registering is the single
+// commitment). Members can register before the contest opens or join while it is
+// live; `createdAt` seeds the personal timer, which never begins before the
+// contest's own startsAt. Every registrant is scored and rated at finalize time.
 model ContestRegistration {
   id        String   @id @default(cuid())
   contestId String
@@ -540,6 +595,7 @@ model ContestParticipant {
   userId       String
   rank         Int
   solvedCount  Int
+  score        Int      @default(0)
   penalty      Int
   ratingBefore Int
   ratingAfter  Int
@@ -551,4 +607,153 @@ model ContestParticipant {
 
   @@unique([contestId, userId])
   @@index([userId, createdAt])
+}
+
+// Community achievement feed. Each row is broadcast to every member; the actor
+// (the achiever) is excluded from their own notifications. Read state is tracked
+// per user via User.notificationsSeenAt rather than fanning out one row per user.
+model Notification {
+  id          String           @id @default(cuid())
+  type        NotificationType
+  actorId     String?
+  recipientId String?
+  message     String
+  link        String?
+  createdAt   DateTime         @default(now())
+
+  actor     User? @relation("NotificationActor", fields: [actorId], references: [id], onDelete: Cascade)
+  recipient User? @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([actorId])
+  @@index([recipientId])
+}
+
+// Conversation and membership metadata is durable. Message content is not:
+// pending payloads are removed after every recipient durably acknowledges them.
+model ChatConversation {
+  id             String               @id @default(cuid())
+  type           ChatConversationType
+  title          String?
+  directKey      String?              @unique
+  createdById    String
+  lastActivityAt DateTime             @default(now())
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  creator        User                 @relation("ChatConversationCreator", fields: [createdById], references: [id], onDelete: Cascade)
+  members        ChatMember[]
+  pendingMessages PendingChatMessage[]
+  sendReceipts   ChatSendReceipt[]
+  reports        ChatReport[]
+
+  @@index([lastActivityAt])
+  @@index([createdById])
+}
+
+model ChatMember {
+  id             String         @id @default(cuid())
+  conversationId String
+  userId         String
+  role           ChatMemberRole @default(MEMBER)
+  joinedAt       DateTime       @default(now())
+  leftAt         DateTime?
+  lastReadAt     DateTime?
+
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([userId, leftAt, conversationId])
+}
+
+model PendingChatMessage {
+  id              String   @id @default(cuid())
+  conversationId  String
+  senderId        String
+  clientMessageId String
+  body             String
+  createdAt        DateTime @default(now())
+  expiresAt        DateTime
+
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User             @relation("PendingChatMessageSender", fields: [senderId], references: [id], onDelete: Cascade)
+  deliveries   ChatDelivery[]
+
+  @@unique([senderId, clientMessageId])
+  @@index([conversationId, createdAt, id])
+  @@index([expiresAt])
+}
+
+model ChatDelivery {
+  id          String   @id @default(cuid())
+  messageId   String
+  recipientId String
+  createdAt   DateTime @default(now())
+
+  message   PendingChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  recipient User               @relation("ChatDeliveryRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, recipientId])
+  @@index([recipientId, createdAt, messageId])
+}
+
+// Receipts contain no message content. They keep send retries idempotent after
+// the corresponding pending payload has already been acknowledged and deleted.
+model ChatSendReceipt {
+  id              String   @id @default(cuid())
+  senderId        String
+  clientMessageId String
+  messageId       String
+  conversationId  String
+  createdAt        DateTime @default(now())
+  expiresAt        DateTime
+
+  sender       User             @relation("ChatSendReceiptSender", fields: [senderId], references: [id], onDelete: Cascade)
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@unique([senderId, clientMessageId])
+  @@index([expiresAt])
+  @@index([conversationId, createdAt])
+}
+
+// A report is an explicit user-provided moderation snapshot and is the only
+// server-side record allowed to retain content after normal delivery.
+model ChatReport {
+  id               String           @id @default(cuid())
+  conversationId   String
+  reporterId       String
+  reportedSenderId String
+  resolvedById     String?
+  messageId        String
+  body             String
+  note             String?
+  messageCreatedAt DateTime
+  status           ChatReportStatus @default(OPEN)
+  createdAt        DateTime         @default(now())
+  resolvedAt       DateTime?
+
+  conversation   ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  reporter       User             @relation("ChatReportReporter", fields: [reporterId], references: [id], onDelete: Cascade)
+  reportedSender User             @relation("ChatReportSender", fields: [reportedSenderId], references: [id], onDelete: Cascade)
+  resolvedBy     User?            @relation("ChatReportResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@unique([reporterId, messageId])
+  @@index([status, createdAt])
+  @@index([conversationId])
+}
+
+model ChatRateLimit {
+  id          String             @id @default(cuid())
+  userId      String
+  scope       ChatRateLimitScope
+  windowStart DateTime
+  count       Int                @default(0)
+  expiresAt   DateTime
+  updatedAt   DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, scope])
+  @@index([expiresAt])
 }

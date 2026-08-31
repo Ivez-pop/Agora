@@ -4,7 +4,12 @@ import { del, put } from "@vercel/blob";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { requireAdmin } from "../../../../lib/guards";
-import { badgeSchema, validateProfilePhoto } from "../../../../lib/members";
+import { badgeSchema, memberDisplayName, validateProfilePhoto } from "../../../../lib/members";
+import {
+  badgeEarnedMessage,
+  createNotification,
+  withOverallRankNotifications,
+} from "../../../../lib/notifications";
 import { TOP_PRACTICE_BADGE_NAME } from "../../../../lib/practice";
 import { AUTO_ASSIGNED_BADGE_NAMES } from "../../../../lib/contest";
 import { prisma } from "../../../../lib/prisma";
@@ -39,6 +44,40 @@ async function uploadBadgeImage(badgeId: string, file: File) {
 function safeReturnPath(value: FormDataEntryValue | null) {
   const path = String(value ?? "/admin/badges");
   return path.startsWith("/") && !path.startsWith("//") ? path : "/admin/badges";
+}
+
+async function notifyBadgeEarned(userIds: string[], badgeId: string) {
+  if (userIds.length === 0) {
+    return;
+  }
+
+  const badge = await prisma.badge.findUnique({
+    where: { id: badgeId },
+    select: { name: true },
+  });
+
+  if (!badge) {
+    return;
+  }
+
+  const users = await prisma.user.findMany({
+    where: { id: { in: userIds } },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      profile: { select: { displayName: true } },
+    },
+  });
+
+  for (const user of users) {
+    await createNotification({
+      type: "BADGE_EARNED",
+      actorId: user.id,
+      message: badgeEarnedMessage(memberDisplayName(user), badge.name),
+      link: `/members/${user.id}`,
+    });
+  }
 }
 
 async function isAutoAssignedBadge(badgeId: string) {
@@ -141,11 +180,22 @@ export async function assignBadge(formData: FormData) {
     return;
   }
 
-  await prisma.memberBadge.upsert({
+  const existing = await prisma.memberBadge.findUnique({
     where: { userId_badgeId: { userId, badgeId } },
-    update: {},
-    create: { userId, badgeId, awardedById: admin.id },
+    select: { id: true },
   });
+
+  await withOverallRankNotifications(() =>
+    prisma.memberBadge.upsert({
+      where: { userId_badgeId: { userId, badgeId } },
+      update: {},
+      create: { userId, badgeId, awardedById: admin.id },
+    }),
+  );
+
+  if (!existing) {
+    await notifyBadgeEarned([userId], badgeId);
+  }
 
   revalidatePath("/members");
   revalidatePath(`/members/${userId}`);
@@ -217,15 +267,26 @@ export async function bulkAssignBadge(formData: FormData) {
     return;
   }
 
-  await prisma.$transaction(
-    userIds.map((userId) =>
-      prisma.memberBadge.upsert({
-        where: { userId_badgeId: { userId, badgeId } },
-        update: {},
-        create: { userId, badgeId, awardedById: admin.id },
-      }),
+  const alreadyAwarded = await prisma.memberBadge.findMany({
+    where: { badgeId, userId: { in: userIds } },
+    select: { userId: true },
+  });
+  const alreadyAwardedIds = new Set(alreadyAwarded.map((row) => row.userId));
+  const newlyAwardedIds = userIds.filter((userId) => !alreadyAwardedIds.has(userId));
+
+  await withOverallRankNotifications(() =>
+    prisma.$transaction(
+      userIds.map((userId) =>
+        prisma.memberBadge.upsert({
+          where: { userId_badgeId: { userId, badgeId } },
+          update: {},
+          create: { userId, badgeId, awardedById: admin.id },
+        }),
+      ),
     ),
   );
+
+  await notifyBadgeEarned(newlyAwardedIds, badgeId);
 
   revalidatePath("/members");
   revalidatePath(`/badges/${badgeId}`);
@@ -253,7 +314,9 @@ export async function removeMemberBadge(formData: FormData) {
       return;
     }
 
-    await prisma.memberBadge.delete({ where: { id: memberBadgeId } });
+    await withOverallRankNotifications(() =>
+      prisma.memberBadge.delete({ where: { id: memberBadgeId } }),
+    );
   }
 
   revalidatePath("/members");

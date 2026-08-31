@@ -6,6 +6,7 @@ import { redirect } from "next/navigation";
 import { eventSchema, parseEventDate } from "../../../../lib/events";
 import { requireAdmin } from "../../../../lib/guards";
 import { validateProfilePhoto } from "../../../../lib/members";
+import { createNotification, eventPublishedMessage } from "../../../../lib/notifications";
 import { prisma } from "../../../../lib/prisma";
 
 function safeFilename(name: string) {
@@ -17,14 +18,7 @@ function safeFilename(name: string) {
   );
 }
 
-function safeReturnPath(value: FormDataEntryValue | null) {
-  const path = String(value ?? "/admin/events");
-  return path.startsWith("/") && !path.startsWith("//") ? path : "/admin/events";
-}
-
-function successPath(path: string) {
-  return `${path}${path.includes("?") ? "&" : "?"}created=event`;
-}
+export type CreateEventState = { ok: boolean; error?: string };
 
 function validateEventImage(file: File, imageErrorPath: string, storageErrorPath: string) {
   const imageError = validateProfilePhoto(file);
@@ -74,23 +68,30 @@ function parseEventForm(formData: FormData) {
   };
 }
 
-export async function createEvent(formData: FormData) {
+// Returns a result state (instead of redirecting) so the client modal can close
+// itself on success — a server-action redirect can't update the URL hash that the
+// :target modal relies on, which left the dialog stuck open.
+export async function createEvent(
+  _prevState: CreateEventState,
+  formData: FormData,
+): Promise<CreateEventState> {
   const admin = await requireAdmin();
-  const returnTo = safeReturnPath(formData.get("returnTo"));
   const parsed = parseEventForm(formData);
 
   if (!parsed) {
-    redirect(`${returnTo}?error=invalid#create-event`);
+    return { ok: false, error: "invalid" };
   }
 
   const image = formData.get("image");
 
   if (image instanceof File && image.size > 0) {
-    validateEventImage(
-      image,
-      `${returnTo}?error=image#create-event`,
-      `${returnTo}?error=storage#create-event`,
-    );
+    if (validateProfilePhoto(image)) {
+      return { ok: false, error: "image" };
+    }
+
+    if (!process.env.BLOB_READ_WRITE_TOKEN) {
+      return { ok: false, error: "storage" };
+    }
   }
 
   const event = await prisma.event.create({
@@ -113,13 +114,23 @@ export async function createEvent(formData: FormData) {
     });
   }
 
+  // Only published events are visible to members, so announce those.
+  if (parsed.published) {
+    await createNotification({
+      type: "EVENT_PUBLISHED",
+      actorId: admin.id,
+      message: eventPublishedMessage(parsed.title),
+      link: `/events/${event.id}`,
+    });
+  }
+
   revalidatePath("/events");
   revalidatePath("/admin/events");
-  redirect(successPath(returnTo));
+  return { ok: true };
 }
 
 export async function updateEvent(formData: FormData) {
-  await requireAdmin();
+  const admin = await requireAdmin();
   const eventId = String(formData.get("eventId") ?? "");
   const parsed = parseEventForm(formData);
 
@@ -160,6 +171,17 @@ export async function updateEvent(formData: FormData) {
       imageUrl,
     },
   });
+
+  // Announce when an event first becomes visible to members (draft -> published),
+  // so editing an already-published event never re-notifies.
+  if (!event.published && parsed.published) {
+    await createNotification({
+      type: "EVENT_PUBLISHED",
+      actorId: admin.id,
+      message: eventPublishedMessage(parsed.title),
+      link: `/events/${event.id}`,
+    });
+  }
 
   revalidatePath("/events");
   revalidatePath(`/events/${event.id}`);

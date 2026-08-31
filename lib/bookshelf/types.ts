@@ -1,4 +1,4 @@
-import { Prisma } from "@prisma/client";
+import { Prisma } from "@/prisma-client";
 
 export type CategoryWithCount = Prisma.CategoryGetPayload<{
   select: {
@@ -21,8 +21,6 @@ export type ResourceWithRelations = Prisma.ResourceGetPayload<{
     resourceLink: true;
     buyLink: true;
     imageUrl: true;
-    createdAt: true;
-    updatedAt: true;
     category: {
       select: {
         id: true;
@@ -38,4 +36,22 @@ export type ResourceWithRelations = Prisma.ResourceGetPayload<{
       };
     };
   };
+}>;
+
+export const resourceListSelect = {
+  id: true,
+  title: true,
+  author: true,
+  type: true,
+  resourceLink: true,
+  imageUrl: true,
+  category: {
+    select: {
+      name: true,
+    },
+  },
+} satisfies Prisma.ResourceSelect;
+
+export type ResourceList = Prisma.ResourceGetPayload<{
+  select: typeof resourceListSelect;
 }>;

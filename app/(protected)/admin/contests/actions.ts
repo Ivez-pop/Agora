@@ -1,16 +1,28 @@
 "use server";
 
-import { ContestStatus } from "@prisma/client";
+import { ContestStatus } from "@/prisma-client";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import {
   computeRatingChanges,
   computeStandings,
   contestSchema,
+  DEFAULT_CONTEST_RATING,
   parseContestDate,
+  personalContestStart,
   syncContestRatingBadges,
+  tierForRating,
 } from "../../../../lib/contest";
 import { requireAdmin } from "../../../../lib/guards";
+import { memberDisplayName } from "../../../../lib/members";
+import {
+  contestFinishedMessage,
+  contestPublishedMessage,
+  createNotification,
+  rankUpMessage,
+  shouldNotifyRankUp,
+  withOverallRankNotifications,
+} from "../../../../lib/notifications";
 import { prisma } from "../../../../lib/prisma";
 
 function safeReturnPath(value: FormDataEntryValue | null) {
@@ -76,7 +88,7 @@ export async function createContest(formData: FormData) {
 }
 
 export async function publishContest(formData: FormData) {
-  await requireAdmin();
+  const admin = await requireAdmin();
   const contestId = String(formData.get("contestId") ?? "");
 
   if (!contestId) {
@@ -85,20 +97,66 @@ export async function publishContest(formData: FormData) {
 
   const contest = await prisma.contest.findUnique({
     where: { id: contestId },
-    select: { id: true, slug: true, _count: { select: { problems: true } } },
+    select: {
+      id: true,
+      slug: true,
+      title: true,
+      description: true,
+      startsAt: true,
+      endsAt: true,
+      status: true,
+      _count: { select: { problems: true } },
+    },
   });
 
   if (!contest || contest._count.problems === 0) {
     redirect(`/admin/contests/${contestId}?error=problems`);
   }
 
+  const wasPublished = contest.status !== ContestStatus.DRAFT;
+
   await prisma.contest.update({
     where: { id: contestId },
     data: { status: ContestStatus.PUBLISHED },
   });
 
+  // Mirror the contest onto the Events tab. Upserting on the unique contestId
+  // link keeps a single event in sync and never duplicates it on re-publish.
+  await prisma.event.upsert({
+    where: { contestId: contest.id },
+    update: {
+      title: contest.title,
+      description: contest.description,
+      startsAt: contest.startsAt,
+      endsAt: contest.endsAt,
+      published: true,
+    },
+    create: {
+      title: contest.title,
+      description: contest.description,
+      location: "Online",
+      startsAt: contest.startsAt,
+      endsAt: contest.endsAt,
+      published: true,
+      createdById: admin.id,
+      contestId: contest.id,
+    },
+  });
+
+  // Announce a contest only the first time it leaves DRAFT, so re-publishing or
+  // idempotent status writes never spam the feed with duplicates.
+  if (!wasPublished) {
+    await createNotification({
+      type: "CONTEST_PUBLISHED",
+      actorId: admin.id,
+      message: contestPublishedMessage(contest.title),
+      link: `/contests/${contest.slug}`,
+    });
+  }
+
   revalidatePath("/contests");
   revalidatePath(`/contests/${contest.slug}`);
+  revalidatePath("/events");
   revalidatePath("/admin/contests");
   revalidatePath(`/admin/contests/${contestId}`);
 }
@@ -150,6 +208,7 @@ export async function finalizeContest(formData: FormData) {
     select: {
       id: true,
       slug: true,
+      title: true,
       status: true,
       startsAt: true,
       endsAt: true,
@@ -160,6 +219,8 @@ export async function finalizeContest(formData: FormData) {
           userId: true,
           contestProblemId: true,
           verdict: true,
+          passedCount: true,
+          totalCount: true,
           createdAt: true,
         },
       },
@@ -175,7 +236,10 @@ export async function finalizeContest(formData: FormData) {
   }
 
   const startTimesByUser = new Map(
-    contest.registrations.map((registration) => [registration.userId, registration.createdAt]),
+    contest.registrations.map((registration) => [
+      registration.userId,
+      personalContestStart(contest, registration.createdAt),
+    ]),
   );
   const standings = computeStandings(contest.submissions, contest.startsAt, startTimesByUser);
   const standingByUser = new Map(standings.map((row) => [row.userId, row]));
@@ -193,7 +257,7 @@ export async function finalizeContest(formData: FormData) {
   const ratingParticipants = Array.from(participantIds).map((userId) => ({
     userId,
     rank: standingByUser.get(userId)?.rank ?? participantIds.size,
-    rating: ratingByUser.get(userId) ?? 1500,
+    rating: ratingByUser.get(userId) ?? DEFAULT_CONTEST_RATING,
   }));
   const ratingChanges = computeRatingChanges(ratingParticipants);
   const changeByUser = new Map(ratingChanges.map((change) => [change.userId, change]));
@@ -204,7 +268,7 @@ export async function finalizeContest(formData: FormData) {
     for (const userId of Array.from(participantIds)) {
       const standing = standingByUser.get(userId);
       const change = changeByUser.get(userId)!;
-      const ratingBefore = ratingByUser.get(userId) ?? 1500;
+      const ratingBefore = ratingByUser.get(userId) ?? DEFAULT_CONTEST_RATING;
 
       await tx.contestParticipant.create({
         data: {
@@ -212,6 +276,7 @@ export async function finalizeContest(formData: FormData) {
           userId,
           rank: standing?.rank ?? participantIds.size,
           solvedCount: standing?.solvedCount ?? 0,
+          score: standing?.score ?? 0,
           penalty: standing?.penalty ?? 0,
           ratingBefore,
           ratingAfter: change.newRating,
@@ -230,15 +295,64 @@ export async function finalizeContest(formData: FormData) {
       where: { id: contestId },
       data: { status: ContestStatus.FINALIZED },
     });
+
+    // Release the contest's problems to the Practice tab now that it is over.
+    await tx.problem.updateMany({
+      where: { contestProblems: { some: { contestId } } },
+      data: { published: true },
+    });
   });
 
+  await withOverallRankNotifications(async () => {
+    for (const change of ratingChanges) {
+      await syncContestRatingBadges(change.userId, change.newRating);
+    }
+  });
+
+  const participants = await prisma.user.findMany({
+    where: { id: { in: Array.from(participantIds) } },
+    select: {
+      id: true,
+      name: true,
+      email: true,
+      profile: { select: { displayName: true } },
+    },
+  });
+  const nameByUser = new Map(participants.map((participant) => [participant.id, participant]));
+
   for (const change of ratingChanges) {
-    await syncContestRatingBadges(change.userId, change.newRating);
+    const ratingBefore = ratingByUser.get(change.userId) ?? DEFAULT_CONTEST_RATING;
+
+    if (!shouldNotifyRankUp(ratingBefore, change.newRating)) {
+      continue;
+    }
+
+    const actor = nameByUser.get(change.userId);
+
+    await createNotification({
+      type: "RANK_UP",
+      actorId: change.userId,
+      message: rankUpMessage(
+        actor ? memberDisplayName(actor) : "A ShardUp member",
+        tierForRating(change.newRating).label,
+      ),
+      link: `/members/${change.userId}`,
+    });
   }
+
+  const winnerId = standings.find((standing) => standing.rank === 1)?.userId;
+  const winner = winnerId ? nameByUser.get(winnerId) : undefined;
+
+  await createNotification({
+    type: "CONTEST_FINISHED",
+    message: contestFinishedMessage(contest.title, winner ? memberDisplayName(winner) : null),
+    link: `/contests/${contest.slug}`,
+  });
 
   revalidatePath("/contests");
   revalidatePath(`/contests/${contest.slug}`);
   revalidatePath("/admin/contests");
   revalidatePath(`/admin/contests/${contestId}`);
   revalidatePath("/members");
+  revalidatePath("/problems");
 }

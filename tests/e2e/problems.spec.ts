@@ -75,6 +75,7 @@ test.describe("problems", () => {
     expect(promptBox).not.toBeNull();
     expect(submitBox).not.toBeNull();
     expect(promptBox!.x + promptBox!.width).toBeLessThanOrEqual(submitBox!.x + 1);
+    expect(submitBox!.width).toBeGreaterThan(promptBox!.width);
   });
 
   test("stacks the practice workspace on mobile without horizontal overflow", async ({ page }) => {
@@ -100,6 +101,37 @@ test.describe("problems", () => {
       () => document.documentElement.scrollWidth > document.documentElement.clientWidth,
     );
     expect(hasHorizontalOverflow).toBe(false);
+  });
+
+  test("toggles between the Description and Submissions tabs", async ({ page }) => {
+    await page.goto(`/problems/${TEST_PROBLEM_SLUG}`);
+
+    const descriptionPanel = page.locator("#panel-description");
+    const submissionsPanel = page.locator("#panel-submissions");
+
+    await expect(descriptionPanel).toBeVisible();
+    await expect(submissionsPanel).toBeHidden();
+
+    await page.getByRole("tab", { name: "Submissions" }).click();
+    await expect(submissionsPanel).toBeVisible();
+    await expect(descriptionPanel).toBeHidden();
+
+    await page.getByRole("tab", { name: "Description" }).click();
+    await expect(descriptionPanel).toBeVisible();
+    await expect(submissionsPanel).toBeHidden();
+  });
+
+  test("editor fills the solution pane on desktop", async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await devLogin(page, "admin");
+    await page.goto(`/problems/${TEST_PROBLEM_SLUG}`);
+
+    const editor = page.locator(".cm-editor");
+    await expect(editor).toBeVisible();
+    const box = await editor.boundingBox();
+    expect(box).not.toBeNull();
+    // Flex-fill should give the editor most of the pane height, not a small fixed box.
+    expect(box!.height).toBeGreaterThan(320);
   });
 
   test("shows expandable runtime error details", async ({ page }) => {

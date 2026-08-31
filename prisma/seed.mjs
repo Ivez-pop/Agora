@@ -1,11 +1,31 @@
-const fs = require("node:fs");
-const path = require("node:path");
-const { PrismaClient } = require("@prisma/client");
-const { buildStressTests } = require("./hidden-stress-tests");
-const { randomUUID } = require("node:crypto");
-const { additionalPracticeProblems, practiceOrderSlugs } = require("./practice-problem-batch");
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+import { PrismaClient } from "../lib/generated/prisma/client.ts";
+import { createPrismaAdapter } from "../lib/prisma-adapter.ts";
 
-const prisma = new PrismaClient();
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const require = createRequire(import.meta.url);
+
+// Seed data helpers are still CommonJS; load them through createRequire so this
+// ESM entrypoint can consume them without converting every module.
+const { buildStressTests } = require("./hidden-stress-tests");
+const { additionalPracticeProblems, practiceOrderSlugs } = require("./practice-problem-batch");
+const {
+  CONTEST_TWO_SLUG,
+  contestTwoProblems,
+  buildContestTwoStressTests,
+} = require("./contest-problem-set");
+const {
+  CONTEST_THREE_SLUG,
+  contestThreeProblems,
+  buildContestThreeStressTests,
+} = require("./contest-problem-set-3");
+const { HIREUP_OA_SLUG, hireupProblems, buildHireupStressTests } = require("./hireup-problem-set");
+
+const prisma = new PrismaClient({ adapter: createPrismaAdapter(process.env.DATABASE_URL) });
 
 const SOLUTIONS_DIR = path.join(__dirname, "..", "scripts", "reference-solutions");
 const REFERENCE_SOLUTION_EXTENSIONS = {
@@ -606,12 +626,12 @@ async function main() {
     where: { name: TOP_PRACTICE_BADGE_NAME },
     update: {
       description: "Automatically held by the current #1 on the practice leaderboard.",
-      xp: 0,
+      xp: 400,
     },
     create: {
       name: TOP_PRACTICE_BADGE_NAME,
       description: "Automatically held by the current #1 on the practice leaderboard.",
-      xp: 0,
+      xp: 400,
     },
     select: { id: true },
   });
@@ -666,11 +686,11 @@ async function main() {
   }
 
   const contestTierBadges = [
-    { name: "Contest Newbie", description: "Contest rating below 1200.", xp: 10 },
-    { name: "Contest Pupil", description: "Contest rating 1200-1399.", xp: 25 },
-    { name: "Contest Specialist", description: "Contest rating 1400-1599.", xp: 50 },
-    { name: "Contest Expert", description: "Contest rating 1600-1899.", xp: 100 },
-    { name: "Contest Candidate Master", description: "Contest rating 1900+.", xp: 200 },
+    { name: "Rough Shard", description: "Contest rating below 1100.", xp: 25 },
+    { name: "Cut Shard", description: "Contest rating 1100-1249.", xp: 100 },
+    { name: "Polished Shard", description: "Contest rating 1250-1399.", xp: 500 },
+    { name: "Radiant Shard", description: "Contest rating 1400-1599.", xp: 2000 },
+    { name: "Molten Shard", description: "Contest rating 1600+.", xp: 3000 },
   ];
 
   for (const badge of contestTierBadges) {
@@ -812,6 +832,336 @@ async function main() {
         order: index,
       })),
     });
+  }
+
+  // ShardUp Contest #2: three custom, escalating problems. Seeded unpublished so
+  // they only appear inside the contest, with reference solutions for admins.
+  const contestTwoStress = buildContestTwoStressTests();
+  const contestTwoProblemIds = [];
+
+  for (const problem of contestTwoProblems) {
+    const testCases = [
+      ...problem.samples.map((testCase, index) => ({
+        input: testCase.input,
+        expectedOutput: testCase.expectedOutput,
+        isSample: true,
+        order: index,
+      })),
+      ...[...problem.hidden, ...(contestTwoStress[problem.slug] ?? [])].map((testCase, index) => ({
+        input: testCase.input,
+        expectedOutput: testCase.expectedOutput,
+        isSample: false,
+        order: problem.samples.length + index,
+      })),
+    ];
+
+    const referenceSolutions = readReferenceSolutions(problem.slug);
+    const primarySolution = referenceSolutions.find((solution) => solution.language === "python");
+    const problemData = {
+      slug: problem.slug,
+      title: problem.title,
+      statement: problem.statement,
+      constraints: problem.constraints,
+      tags: problem.tags,
+      difficulty: problem.difficulty,
+      timeLimitMs: problem.timeLimitMs,
+      practiceOrder: 300000,
+      solutionCode: primarySolution?.code,
+      solutionLanguage: primarySolution?.language,
+    };
+
+    // `published` is owned by the app after seeding: finalizing a contest
+    // releases its problems to the Practice tab (published: true). Only set the
+    // contest-only default on create so reseeds never un-publish a finalized
+    // contest's problems.
+    const savedProblem = await prisma.problem.upsert({
+      where: { slug: problem.slug },
+      update: problemData,
+      create: { ...problemData, published: false },
+      select: { id: true },
+    });
+
+    await prisma.testCase.deleteMany({ where: { problemId: savedProblem.id } });
+    await prisma.testCase.createMany({
+      data: testCases.map((testCase) => ({ ...testCase, problemId: savedProblem.id })),
+    });
+
+    await prisma.problemReferenceSolution.deleteMany({ where: { problemId: savedProblem.id } });
+    if (referenceSolutions.length > 0) {
+      await prisma.problemReferenceSolution.createMany({
+        data: referenceSolutions.map((solution) => ({
+          ...solution,
+          problemId: savedProblem.id,
+        })),
+      });
+    }
+
+    contestTwoProblemIds.push(savedProblem.id);
+  }
+
+  // Sunday 8:00 PM IST (14:30 UTC), one-hour window, 60-minute personal timer.
+  // `status` is owned by the app after seeding (e.g. finalizing the contest),
+  // so it is only set on create to avoid reverting a FINALIZED contest on reseed.
+  const contestTwo = await prisma.contest.upsert({
+    where: { slug: CONTEST_TWO_SLUG },
+    update: {
+      title: "ShardUp Contest #2",
+      description:
+        "A one-hour, three-problem sprint that starts Sunday at 8:00 PM IST. The problems escalate in difficulty (A < B < C), each a custom, tougher twist on a classic interview question. Register, then race your personal 60-minute timer.",
+      startsAt: new Date("2026-07-05T14:30:00.000Z"),
+      endsAt: new Date("2026-07-05T15:30:00.000Z"),
+      durationMinutes: 60,
+    },
+    create: {
+      slug: CONTEST_TWO_SLUG,
+      title: "ShardUp Contest #2",
+      description:
+        "A one-hour, three-problem sprint that starts Sunday at 8:00 PM IST. The problems escalate in difficulty (A < B < C), each a custom, tougher twist on a classic interview question. Register, then race your personal 60-minute timer.",
+      startsAt: new Date("2026-07-05T14:30:00.000Z"),
+      endsAt: new Date("2026-07-05T15:30:00.000Z"),
+      durationMinutes: 60,
+      status: "PUBLISHED",
+    },
+    select: { id: true },
+  });
+
+  await prisma.contestProblem.deleteMany({ where: { contestId: contestTwo.id } });
+  await prisma.contestProblem.createMany({
+    data: contestTwoProblemIds.map((problemId, index) => ({
+      contestId: contestTwo.id,
+      problemId,
+      label: String.fromCharCode("A".charCodeAt(0) + index),
+      order: index,
+    })),
+  });
+
+  // ShardUp Contest #3: three custom, escalating problems. Seeded unpublished so
+  // they only appear inside the contest, with reference solutions for admins.
+  const contestThreeStress = buildContestThreeStressTests();
+  const contestThreeProblemIds = [];
+
+  for (const problem of contestThreeProblems) {
+    const testCases = [
+      ...problem.samples.map((testCase, index) => ({
+        input: testCase.input,
+        expectedOutput: testCase.expectedOutput,
+        isSample: true,
+        order: index,
+      })),
+      ...[...problem.hidden, ...(contestThreeStress[problem.slug] ?? [])].map(
+        (testCase, index) => ({
+          input: testCase.input,
+          expectedOutput: testCase.expectedOutput,
+          isSample: false,
+          order: problem.samples.length + index,
+        }),
+      ),
+    ];
+
+    const referenceSolutions = readReferenceSolutions(problem.slug);
+    const primarySolution = referenceSolutions.find((solution) => solution.language === "python");
+    const problemData = {
+      slug: problem.slug,
+      title: problem.title,
+      statement: problem.statement,
+      constraints: problem.constraints,
+      tags: problem.tags,
+      difficulty: problem.difficulty,
+      timeLimitMs: problem.timeLimitMs,
+      practiceOrder: 300000,
+      solutionCode: primarySolution?.code,
+      solutionLanguage: primarySolution?.language,
+    };
+
+    // `published` is owned by the app after seeding: finalizing a contest
+    // releases its problems to the Practice tab (published: true). Only set the
+    // contest-only default on create so reseeds never un-publish a finalized
+    // contest's problems.
+    const savedProblem = await prisma.problem.upsert({
+      where: { slug: problem.slug },
+      update: problemData,
+      create: { ...problemData, published: false },
+      select: { id: true },
+    });
+
+    await prisma.testCase.deleteMany({ where: { problemId: savedProblem.id } });
+    await prisma.testCase.createMany({
+      data: testCases.map((testCase) => ({ ...testCase, problemId: savedProblem.id })),
+    });
+
+    await prisma.problemReferenceSolution.deleteMany({ where: { problemId: savedProblem.id } });
+    if (referenceSolutions.length > 0) {
+      await prisma.problemReferenceSolution.createMany({
+        data: referenceSolutions.map((solution) => ({
+          ...solution,
+          problemId: savedProblem.id,
+        })),
+      });
+    }
+
+    contestThreeProblemIds.push(savedProblem.id);
+  }
+
+  // Saturday 8:00 PM IST (14:30 UTC), one-hour window, 60-minute personal timer.
+  // `status` is owned by the app after seeding (e.g. finalizing the contest),
+  // so it is only set on create to avoid reverting a FINALIZED contest on reseed.
+  const contestThree = await prisma.contest.upsert({
+    where: { slug: CONTEST_THREE_SLUG },
+    update: {
+      title: "ShardUp Contest #3",
+      description:
+        "A one-hour, three-problem sprint that starts Saturday at 8:00 PM IST. The three problems escalate in difficulty (A < B < C) and are revealed only when the contest opens. Register anytime before it starts — your personal 60-minute timer begins the moment it goes live.",
+      startsAt: new Date("2026-07-11T14:30:00.000Z"),
+      endsAt: new Date("2026-07-11T15:30:00.000Z"),
+      durationMinutes: 60,
+    },
+    create: {
+      slug: CONTEST_THREE_SLUG,
+      title: "ShardUp Contest #3",
+      description:
+        "A one-hour, three-problem sprint that starts Saturday at 8:00 PM IST. The three problems escalate in difficulty (A < B < C) and are revealed only when the contest opens. Register anytime before it starts — your personal 60-minute timer begins the moment it goes live.",
+      startsAt: new Date("2026-07-11T14:30:00.000Z"),
+      endsAt: new Date("2026-07-11T15:30:00.000Z"),
+      durationMinutes: 60,
+      status: "PUBLISHED",
+    },
+    select: { id: true },
+  });
+
+  await prisma.contestProblem.deleteMany({ where: { contestId: contestThree.id } });
+  await prisma.contestProblem.createMany({
+    data: contestThreeProblemIds.map((problemId, index) => ({
+      contestId: contestThree.id,
+      problemId,
+      label: String.fromCharCode("A".charCodeAt(0) + index),
+      order: index,
+    })),
+  });
+
+  // HireUp Online Assessment: the first round of the HireUp mock-hiring event.
+  // Three escalating problems (A < B < C) in the style of recent Uber/Amazon/Google
+  // OAs. Seeded unpublished so they only appear inside the OA contest, with
+  // reference solutions for admins.
+  const hireupStress = buildHireupStressTests();
+  const hireupProblemIds = [];
+
+  for (const problem of hireupProblems) {
+    const testCases = [
+      ...problem.samples.map((testCase, index) => ({
+        input: testCase.input,
+        expectedOutput: testCase.expectedOutput,
+        isSample: true,
+        order: index,
+      })),
+      ...[...problem.hidden, ...(hireupStress[problem.slug] ?? [])].map((testCase, index) => ({
+        input: testCase.input,
+        expectedOutput: testCase.expectedOutput,
+        isSample: false,
+        order: problem.samples.length + index,
+      })),
+    ];
+
+    const referenceSolutions = readReferenceSolutions(problem.slug);
+    const primarySolution = referenceSolutions.find((solution) => solution.language === "python");
+    const problemData = {
+      slug: problem.slug,
+      title: problem.title,
+      statement: problem.statement,
+      constraints: problem.constraints,
+      tags: problem.tags,
+      difficulty: problem.difficulty,
+      timeLimitMs: problem.timeLimitMs,
+      practiceOrder: 300000,
+      solutionCode: primarySolution?.code,
+      solutionLanguage: primarySolution?.language,
+    };
+
+    // `published` is owned by the app after seeding: finalizing a contest
+    // releases its problems to the Practice tab (published: true). Only set the
+    // contest-only default on create so reseeds never un-publish a finalized
+    // contest's problems.
+    const savedProblem = await prisma.problem.upsert({
+      where: { slug: problem.slug },
+      update: problemData,
+      create: { ...problemData, published: false },
+      select: { id: true },
+    });
+
+    await prisma.testCase.deleteMany({ where: { problemId: savedProblem.id } });
+    await prisma.testCase.createMany({
+      data: testCases.map((testCase) => ({ ...testCase, problemId: savedProblem.id })),
+    });
+
+    await prisma.problemReferenceSolution.deleteMany({ where: { problemId: savedProblem.id } });
+    if (referenceSolutions.length > 0) {
+      await prisma.problemReferenceSolution.createMany({
+        data: referenceSolutions.map((solution) => ({
+          ...solution,
+          problemId: savedProblem.id,
+        })),
+      });
+    }
+
+    hireupProblemIds.push(savedProblem.id);
+  }
+
+  // 1 August 8:00 PM IST (14:30 UTC), 90-minute window and personal timer.
+  // Seeded PUBLISHED directly (never through the admin publish action) so it is
+  // surfaced only inside the HireUp hub and is not mirrored onto the Events tab.
+  // `status` is owned by the app after seeding, so it is only set on create.
+  const hireupOa = await prisma.contest.upsert({
+    where: { slug: HIREUP_OA_SLUG },
+    update: {
+      title: "HireUp Online Assessment",
+      description:
+        "Online assessment for the HireUp mock hiring. Solve the problems within your 90-minute timer.",
+      startsAt: new Date("2026-08-01T14:30:00.000Z"),
+      endsAt: new Date("2026-08-01T16:00:00.000Z"),
+      durationMinutes: 90,
+    },
+    create: {
+      slug: HIREUP_OA_SLUG,
+      title: "HireUp Online Assessment",
+      description:
+        "Online assessment for the HireUp mock hiring. Solve the problems within your 90-minute timer.",
+      startsAt: new Date("2026-08-01T14:30:00.000Z"),
+      endsAt: new Date("2026-08-01T16:00:00.000Z"),
+      durationMinutes: 90,
+      status: "PUBLISHED",
+    },
+    select: { id: true },
+  });
+
+  await prisma.contestProblem.deleteMany({ where: { contestId: hireupOa.id } });
+  await prisma.contestProblem.createMany({
+    data: hireupProblemIds.map((problemId, index) => ({
+      contestId: hireupOa.id,
+      problemId,
+      label: String.fromCharCode("A".charCodeAt(0) + index),
+      order: index,
+    })),
+  });
+
+  // HireUp mock-hiring umbrella event: spans the whole hiring window (1 August
+  // 8:00 PM IST through 31 August). Shown on both the Events tab and the HireUp
+  // hub. Matched by title so reseeds update the single event in place.
+  const hireupEventData = {
+    title: "HireUp",
+    description:
+      "HireUp is ShardUp's mock-hiring drive. It runs across August as a series of rounds, starting with an online assessment on 1 August at 8:00 PM IST and expanding into further rounds as the drive progresses. Follow the HireUp tab to take part.",
+    location: "Online",
+    startsAt: new Date("2026-08-01T14:30:00.000Z"),
+    endsAt: new Date("2026-08-31T18:30:00.000Z"),
+    published: true,
+  };
+  const existingHireupEvent = await prisma.event.findFirst({
+    where: { title: hireupEventData.title },
+    select: { id: true },
+  });
+  if (existingHireupEvent) {
+    await prisma.event.update({ where: { id: existingHireupEvent.id }, data: hireupEventData });
+  } else {
+    await prisma.event.create({ data: hireupEventData });
   }
 
   // Seed a minimal Bookshelf smoke seed

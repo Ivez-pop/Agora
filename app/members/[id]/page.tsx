@@ -1,15 +1,16 @@
 /* eslint-disable @next/next/no-img-element */
 
-import { Role, UserStatus } from "@prisma/client";
+import { Role, UserStatus } from "@/prisma-client";
 import { notFound } from "next/navigation";
 import { auth } from "../../../auth";
 import CreateBadgeModal from "../../create-badge-modal";
 import SendNudgeModal from "../../send-nudge-modal";
-import { tierForRating } from "../../../lib/contest";
+import { DEFAULT_CONTEST_RATING, tierForRating } from "../../../lib/contest";
 import { memberDisplayName, memberInitials, medalsForMembers } from "../../../lib/members";
 import { prisma } from "../../../lib/prisma";
 import { assignBadge, removeMemberBadge } from "../../(protected)/admin/badges/actions";
 import NudgesInbox from "../../nudges/nudges-inbox";
+import ContestRatingChart from "../../../components/contest/contest-rating-chart";
 
 export const dynamic = "force-dynamic";
 
@@ -51,19 +52,28 @@ export default async function MemberProfilePage({
     session?.user?.id === member.id ||
     (session?.user?.role === Role.ADMIN && session.user.status === UserStatus.ACTIVE);
   const canNudge = session?.user?.status === UserStatus.ACTIVE && session.user.id !== member.id;
+  const canMessage = session?.user?.status === UserStatus.ACTIVE && session.user.id !== member.id;
   const isOwnProfile = session?.user?.status === UserStatus.ACTIVE && session.user.id === member.id;
   const isAdmin = session?.user?.role === Role.ADMIN && session.user.status === UserStatus.ACTIVE;
   const badges = isAdmin ? await prisma.badge.findMany({ orderBy: { name: "asc" } }) : [];
   const assignedBadgeIds = new Set(member.memberBadges.map((memberBadge) => memberBadge.badgeId));
   const availableBadges = badges.filter((badge) => !assignedBadgeIds.has(badge.id));
-  const contestRating = member.profile?.contestRating ?? 1500;
+  const contestRating = member.profile?.contestRating ?? DEFAULT_CONTEST_RATING;
   const contestTier = tierForRating(contestRating);
   const contestHistory = await prisma.contestParticipant.findMany({
     where: { userId: member.id },
     orderBy: { createdAt: "desc" },
-    take: 5,
+    take: 20,
     include: { contest: { select: { title: true, slug: true } } },
   });
+  const ratingChartPoints = [...contestHistory].reverse().map((entry) => ({
+    rating: entry.ratingAfter,
+    title: entry.contest.title,
+    slug: entry.contest.slug,
+    rank: entry.rank,
+    delta: entry.ratingDelta,
+    date: entry.createdAt.toISOString(),
+  }));
 
   return (
     <main className="app-shell member-profile-page workspace-shell">
@@ -101,12 +111,16 @@ export default async function MemberProfilePage({
                 Send nudge
               </a>
               <SendNudgeModal
-                error={searchParams?.error}
                 recipientId={member.id}
                 recipientName={name}
                 returnTo={`/members/${member.id}`}
               />
             </>
+          ) : null}
+          {canMessage ? (
+            <a className="secondary-button" href={`/messages?recipient=${member.id}`}>
+              Message
+            </a>
           ) : null}
         </aside>
 
@@ -155,19 +169,16 @@ export default async function MemberProfilePage({
           <section className="member-panel">
             <p className="section-label">Contests</p>
             <h2>Contest rating</h2>
-            <p>
-              <strong>{contestRating}</strong> · {contestTier.name}
-            </p>
             {contestHistory.length > 0 ? (
-              <div className="member-link-list">
-                {contestHistory.map((entry) => (
-                  <span key={entry.id}>
-                    <a href={`/contests/${entry.contest.slug}`}>{entry.contest.title}</a> · #
-                    {entry.rank} · {entry.ratingDelta >= 0 ? "+" : ""}
-                    {entry.ratingDelta}
+              <>
+                <p>
+                  <strong>{contestRating}</strong> ·{" "}
+                  <span className={`contest-tier contest-tier--${contestTier.slug}`}>
+                    {contestTier.label}
                   </span>
-                ))}
-              </div>
+                </p>
+                <ContestRatingChart points={ratingChartPoints} />
+              </>
             ) : (
               <p>No finalized contests yet.</p>
             )}

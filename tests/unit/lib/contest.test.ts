@@ -1,10 +1,12 @@
-import { ContestStatus, SubmissionVerdict } from "@prisma/client";
+import { ContestStatus, SubmissionVerdict } from "@/prisma-client";
 import { describe, expect, it } from "vitest";
 import {
   computeRatingChanges,
   computeStandings,
   contestPhase,
+  contestWindowForUser,
   DEFAULT_CONTEST_RATING,
+  personalContestStart,
   tierForRating,
 } from "../../../lib/contest";
 
@@ -15,8 +17,17 @@ function submission(
   contestProblemId: string,
   verdict: SubmissionVerdict,
   createdAt: Date,
+  passedCount = verdict === SubmissionVerdict.ACCEPTED ? 1 : 0,
+  totalCount = 1,
 ) {
-  return { userId, contestProblemId, verdict, createdAt };
+  return {
+    userId,
+    contestProblemId,
+    verdict,
+    passedCount,
+    totalCount,
+    createdAt,
+  };
 }
 
 describe("computeStandings", () => {
@@ -37,7 +48,7 @@ describe("computeStandings", () => {
 
     expect(standings).toEqual([
       expect.objectContaining({ userId: "bob", solvedCount: 1, penalty: 10, rank: 1 }),
-      expect.objectContaining({ userId: "alice", solvedCount: 1, penalty: 40, rank: 2 }),
+      expect.objectContaining({ userId: "alice", solvedCount: 1, penalty: 25, rank: 2 }),
     ]);
   });
 
@@ -55,6 +66,43 @@ describe("computeStandings", () => {
     );
 
     expect(standings).toEqual([]);
+  });
+
+  it("uses only the best partial score for each problem", () => {
+    const standings = computeStandings(
+      [
+        submission(
+          "alice",
+          "p1",
+          SubmissionVerdict.WRONG_ANSWER,
+          new Date("2026-07-01T10:05:00.000Z"),
+          3,
+          10,
+        ),
+        submission(
+          "alice",
+          "p1",
+          SubmissionVerdict.WRONG_ANSWER,
+          new Date("2026-07-01T10:20:00.000Z"),
+          7,
+          10,
+        ),
+        submission(
+          "bob",
+          "p1",
+          SubmissionVerdict.WRONG_ANSWER,
+          new Date("2026-07-01T10:10:00.000Z"),
+          6,
+          10,
+        ),
+      ],
+      startsAt,
+    );
+
+    expect(standings).toEqual([
+      expect.objectContaining({ userId: "alice", score: 70, solvedCount: 0, rank: 1 }),
+      expect.objectContaining({ userId: "bob", score: 60, solvedCount: 0, rank: 2 }),
+    ]);
   });
 
   it("uses participant start times for demo contest penalties", () => {
@@ -95,11 +143,16 @@ describe("computeRatingChanges", () => {
 
 describe("tierForRating", () => {
   it("maps ratings to contest tiers", () => {
-    expect(tierForRating(1100).name).toBe("Contest Newbie");
-    expect(tierForRating(1250).name).toBe("Contest Pupil");
-    expect(tierForRating(1500).name).toBe("Contest Specialist");
-    expect(tierForRating(1700).name).toBe("Contest Expert");
-    expect(tierForRating(2000).name).toBe("Contest Candidate Master");
+    expect(tierForRating(1000).name).toBe("Rough Shard");
+    expect(tierForRating(1150).name).toBe("Cut Shard");
+    expect(tierForRating(1300).name).toBe("Polished Shard");
+    expect(tierForRating(1500).name).toBe("Radiant Shard");
+    expect(tierForRating(1700).name).toBe("Molten Shard");
+  });
+
+  it("exposes a short label and color for each tier", () => {
+    expect(tierForRating(1000).label).toBe("Rough");
+    expect(tierForRating(1000).color).toMatch(/^#[0-9a-f]{6}$/i);
   });
 });
 
@@ -131,5 +184,55 @@ describe("contestPhase", () => {
     expect(contestPhase(contest, new Date("2026-07-01T11:01:00.000Z"), registeredAt)).toBe(
       "finished",
     );
+  });
+
+  it("starts the timer at the contest open for members who register early", () => {
+    const contest = {
+      status: ContestStatus.PUBLISHED,
+      startsAt: new Date("2026-07-01T10:00:00.000Z"),
+      endsAt: new Date("2026-07-01T11:00:00.000Z"),
+      durationMinutes: 60,
+    };
+    // Registered a day early — the personal timer must not begin before startsAt.
+    const registeredAt = new Date("2026-06-30T09:00:00.000Z");
+
+    expect(contestPhase(contest, new Date("2026-07-01T09:59:00.000Z"), registeredAt)).toBe(
+      "upcoming",
+    );
+    expect(contestPhase(contest, new Date("2026-07-01T10:30:00.000Z"), registeredAt)).toBe(
+      "running",
+    );
+    expect(contestPhase(contest, new Date("2026-07-01T11:01:00.000Z"), registeredAt)).toBe(
+      "finished",
+    );
+  });
+});
+
+describe("personalContestStart", () => {
+  const contest = {
+    status: ContestStatus.PUBLISHED,
+    startsAt: new Date("2026-07-01T10:00:00.000Z"),
+    endsAt: new Date("2026-07-01T11:00:00.000Z"),
+    durationMinutes: 60,
+  };
+
+  it("clamps early registrations to the contest open time", () => {
+    const registeredAt = new Date("2026-06-30T09:00:00.000Z");
+
+    expect(personalContestStart(contest, registeredAt)).toEqual(contest.startsAt);
+    expect(contestWindowForUser(contest, registeredAt)).toEqual({
+      startsAt: contest.startsAt,
+      endsAt: contest.endsAt,
+    });
+  });
+
+  it("uses the join time for members who register mid-window", () => {
+    const registeredAt = new Date("2026-07-01T10:20:00.000Z");
+
+    expect(personalContestStart(contest, registeredAt)).toEqual(registeredAt);
+    expect(contestWindowForUser(contest, registeredAt)).toEqual({
+      startsAt: registeredAt,
+      endsAt: contest.endsAt,
+    });
   });
 });

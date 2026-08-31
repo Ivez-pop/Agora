@@ -1,16 +1,19 @@
-import { UserStatus } from "@prisma/client";
+import { UserStatus } from "@/prisma-client";
 import { notFound } from "next/navigation";
 import { auth } from "../../../auth";
 import {
   computeStandings,
+  contestDurationMinutes,
   contestPhase,
   contestWindowForUser,
+  formatContestInstant,
   formatContestTiming,
   formatContestWindow,
+  personalContestStart,
   standingsWithNames,
 } from "../../../lib/contest";
 import { prisma } from "../../../lib/prisma";
-import { registerForContest } from "./actions";
+import ContestRegistrationControl from "../registration-control";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 30;
@@ -25,7 +28,7 @@ export default async function ContestDetailPage({
     include: {
       problems: {
         orderBy: { order: "asc" },
-        include: { problem: { select: { title: true, difficulty: true } } },
+        include: { problem: { select: { title: true, difficulty: true, slug: true } } },
       },
       registrations: { select: { id: true, userId: true, createdAt: true } },
       submissions: {
@@ -33,9 +36,12 @@ export default async function ContestDetailPage({
           userId: true,
           contestProblemId: true,
           verdict: true,
+          passedCount: true,
+          totalCount: true,
           createdAt: true,
         },
       },
+      _count: { select: { registrations: true } },
     },
   });
 
@@ -52,7 +58,10 @@ export default async function ContestDetailPage({
     ? contestWindowForUser(contest, currentRegistration.createdAt)
     : null;
   const startTimesByUser = new Map(
-    contest.registrations.map((registration) => [registration.userId, registration.createdAt]),
+    contest.registrations.map((registration) => [
+      registration.userId,
+      personalContestStart(contest, registration.createdAt),
+    ]),
   );
   const standings = standingsWithNames(
     computeStandings(contest.submissions, contest.startsAt, startTimesByUser),
@@ -71,11 +80,8 @@ export default async function ContestDetailPage({
     }),
   );
 
-  const canStart =
-    session?.user?.status === UserStatus.ACTIVE &&
-    (phase === "upcoming" || phase === "running") &&
-    !isRegistered;
   const canViewProblems = isRegistered && phase === "running";
+  const isAdmin = session?.user?.role === "ADMIN" && session.user.status === UserStatus.ACTIVE;
 
   return (
     <main className="app-shell wide-card workspace-shell">
@@ -93,16 +99,29 @@ export default async function ContestDetailPage({
         ) : null}
 
         {searchParams?.error === "register" ? (
-          <div className="form-message error">Start this contest before solving problems.</div>
+          <div className="form-message error">
+            Register for this contest before solving problems.
+          </div>
         ) : null}
 
-        {canStart ? (
-          <form action={registerForContest} className="inline-form">
-            <input type="hidden" name="contestSlug" value={contest.slug} />
-            <button className="button" type="submit">
-              Start contest
-            </button>
-          </form>
+        {phase === "upcoming" ? (
+          <div className="form-message">
+            This contest hasn&apos;t started yet. It opens {formatContestInstant(contest.startsAt)}.
+            Register now and your {contestDurationMinutes(contest)}-minute timer starts
+            automatically when it opens.
+          </div>
+        ) : null}
+
+        {phase === "upcoming" || phase === "running" ? (
+          <>
+            <p className="nudge-meta">{contest._count.registrations} registered</p>
+            <ContestRegistrationControl
+              contestSlug={contest.slug}
+              userStatus={session?.user?.status}
+              isRegistered={isRegistered}
+              phase={phase}
+            />
+          </>
         ) : null}
 
         {canViewProblems ? (
@@ -125,11 +144,61 @@ export default async function ContestDetailPage({
           </section>
         ) : null}
 
+        {isAdmin ? (
+          <section className="nudge-section">
+            <h2>Test contest (admin)</h2>
+            <p className="nudge-meta">
+              Enter the live problem view without registering, run the reference solutions against
+              every test case, and confirm everything works before the contest opens. Preview does
+              not create submissions or affect standings.
+            </p>
+            {contest.problems.length > 0 ? (
+              <p>
+                <a
+                  className="button"
+                  href={`/contests/${contest.slug}/problems/${contest.problems[0].label}?preview=1`}
+                >
+                  Test contest
+                </a>
+              </p>
+            ) : null}
+            <div className="event-list">
+              {contest.problems.map((contestProblem) => (
+                <article className="event-card" key={`admin-${contestProblem.id}`}>
+                  <div>
+                    <strong>
+                      {contestProblem.label}. {contestProblem.problem.title}
+                    </strong>
+                    <p className="nudge-meta">{contestProblem.problem.difficulty}</p>
+                  </div>
+                  <div className="event-actions">
+                    <a
+                      className="secondary-button"
+                      href={`/contests/${contest.slug}/problems/${contestProblem.label}?preview=1`}
+                    >
+                      Open in preview
+                    </a>
+                    <a
+                      className="text-link"
+                      href={`/admin/problems/${contestProblem.problem.slug}`}
+                    >
+                      Reference solutions
+                    </a>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        ) : null}
+
         <section className="practice-leaderboard" aria-labelledby="contest-standings-title">
           <div className="practice-leaderboard-header">
             <h2 id="contest-standings-title">Standings</h2>
-            <span>Solved · Penalty</span>
+            <span>Points · Solved · Time taken</span>
           </div>
+          <p className="nudge-meta">
+            Each problem is worth 100 points. Only your best submission per problem counts.
+          </p>
           {standings.length > 0 ? (
             <div className="leaderboard-list">
               {standings.map((entry) => (
@@ -137,13 +206,14 @@ export default async function ContestDetailPage({
                   <span className="leaderboard-rank">#{entry.rank}</span>
                   <span className="leaderboard-name">{entry.name}</span>
                   <span className="leaderboard-score">
-                    {entry.solvedCount} · {entry.penalty}
+                    {entry.score}/{contest.problems.length * 100} · {entry.solvedCount} solved ·{" "}
+                    {entry.penalty} min
                   </span>
                 </div>
               ))}
             </div>
           ) : (
-            <div className="form-message">No accepted submissions yet.</div>
+            <div className="form-message">No scored submissions yet.</div>
           )}
         </section>
       </section>

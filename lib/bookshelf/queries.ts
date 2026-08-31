@@ -1,7 +1,45 @@
 import { prisma } from "../prisma";
-import { RECENT_RESOURCES_LIMIT } from "./constants";
-import { CategoryWithCount, ResourceWithRelations } from "./types";
-import { Prisma, ResourceType } from "@prisma/client";
+import { DEFAULT_PAGE_SIZE } from "./constants";
+import {
+  CategoryWithCount,
+  ResourceWithRelations,
+  ResourceList,
+  resourceListSelect,
+} from "./types";
+import { Prisma, ResourceType } from "@/prisma-client";
+
+// Full selection for detail views
+const resourceDetailSelect = {
+  id: true,
+  title: true,
+  author: true,
+  type: true,
+  recommendationReason: true,
+  resourceLink: true,
+  buyLink: true,
+  imageUrl: true,
+  category: {
+    select: {
+      id: true,
+      name: true,
+      slug: true,
+    },
+  },
+  recommendedBy: {
+    select: {
+      id: true,
+      name: true,
+      image: true,
+    },
+  },
+} satisfies Prisma.ResourceSelect;
+
+// Helper to cleanly parse search params page numbers consistently
+function parsePage(page: string | number | undefined): number {
+  if (!page) return 1;
+  const parsedPage = typeof page === "string" ? parseInt(page, 10) : page;
+  return !isNaN(parsedPage) && parsedPage > 0 ? parsedPage : 1;
+}
 
 export async function getCategories(): Promise<CategoryWithCount[]> {
   return prisma.category.findMany({
@@ -17,119 +55,39 @@ export async function getCategories(): Promise<CategoryWithCount[]> {
   });
 }
 
-export async function getRecentResources(
-  limit: number = RECENT_RESOURCES_LIMIT,
-): Promise<ResourceWithRelations[]> {
+export async function getRecentResources(limit: number = 6) {
   return prisma.resource.findMany({
     orderBy: { createdAt: "desc" },
     take: limit,
-    select: {
-      id: true,
-      title: true,
-      author: true,
-      type: true,
-      recommendationReason: true,
-      resourceLink: true,
-      buyLink: true,
-      imageUrl: true,
-      createdAt: true,
-      updatedAt: true,
-      category: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-        },
-      },
-      recommendedBy: {
-        select: {
-          id: true,
-          name: true,
-          image: true,
-        },
-      },
-    },
+    select: resourceListSelect,
   });
 }
 
-export async function getCategoryBySlug(slug: string): Promise<CategoryWithCount | null> {
+export async function getCategoryBySlug(slug: string) {
   return prisma.category.findUnique({
     where: { slug },
     select: {
       id: true,
       name: true,
       slug: true,
-      _count: {
-        select: { resources: true },
-      },
     },
   });
 }
 
-export async function getResourcesByCategory(slug: string): Promise<ResourceWithRelations[]> {
+export async function getResourcesByCategory(slug: string) {
   return prisma.resource.findMany({
     where: {
       category: { slug },
     },
     orderBy: { title: "asc" },
-    select: {
-      id: true,
-      title: true,
-      author: true,
-      type: true,
-      recommendationReason: true,
-      resourceLink: true,
-      buyLink: true,
-      imageUrl: true,
-      createdAt: true,
-      updatedAt: true,
-      category: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-        },
-      },
-      recommendedBy: {
-        select: {
-          id: true,
-          name: true,
-          image: true,
-        },
-      },
-    },
+    select: resourceListSelect,
   });
 }
 
 export async function getResourceById(id: string): Promise<ResourceWithRelations | null> {
   return prisma.resource.findUnique({
     where: { id },
-    select: {
-      id: true,
-      title: true,
-      author: true,
-      type: true,
-      recommendationReason: true,
-      resourceLink: true,
-      buyLink: true,
-      imageUrl: true,
-      createdAt: true,
-      updatedAt: true,
-      category: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-        },
-      },
-      recommendedBy: {
-        select: {
-          id: true,
-          name: true,
-          image: true,
-        },
-      },
-    },
+    select: resourceDetailSelect,
   });
 }
 
@@ -167,61 +125,28 @@ export async function getPaginatedResources(params: {
   page?: string | number;
   limit?: number;
 }): Promise<{
-  resources: ResourceWithRelations[];
+  resources: ResourceList[];
   total: number;
   totalPages: number;
   currentPage: number;
 }> {
   const { where, orderBy } = buildResourcesQuery(params);
-
-  let currentPage = 1;
-  if (params.page) {
-    const parsedPage = typeof params.page === "string" ? parseInt(params.page, 10) : params.page;
-    if (!isNaN(parsedPage) && parsedPage > 0) {
-      currentPage = parsedPage;
-    }
-  }
-
-  const limit = params.limit ?? 6;
+  const currentPage = parsePage(params.page);
+  const limit = params.limit ?? DEFAULT_PAGE_SIZE;
   const skip = (currentPage - 1) * limit;
 
-  const [resources, total] = await prisma.$transaction([
+  const [resources, total] = await Promise.all([
     prisma.resource.findMany({
       where,
       orderBy,
       skip,
       take: limit,
-      select: {
-        id: true,
-        title: true,
-        author: true,
-        type: true,
-        recommendationReason: true,
-        resourceLink: true,
-        buyLink: true,
-        imageUrl: true,
-        createdAt: true,
-        updatedAt: true,
-        category: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-          },
-        },
-        recommendedBy: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-      },
+      select: resourceListSelect,
     }),
     prisma.resource.count({ where }),
   ]);
 
-  const totalPages = Math.ceil(total / limit);
+  const totalPages = Math.max(1, Math.ceil(total / limit));
 
   return {
     resources,
@@ -235,22 +160,14 @@ export async function getPaginatedCategoryResources(
   categorySlug: string,
   params: { q?: string; type?: string; sort?: string; page?: string | number; limit?: number },
 ): Promise<{
-  resources: ResourceWithRelations[];
+  resources: ResourceList[];
   total: number;
   totalPages: number;
   currentPage: number;
 }> {
   const { where, orderBy } = buildResourcesQuery(params);
-
-  let currentPage = 1;
-  if (params.page) {
-    const parsedPage = typeof params.page === "string" ? parseInt(params.page, 10) : params.page;
-    if (!isNaN(parsedPage) && parsedPage > 0) {
-      currentPage = parsedPage;
-    }
-  }
-
-  const limit = params.limit ?? 6;
+  const currentPage = parsePage(params.page);
+  const limit = params.limit ?? DEFAULT_PAGE_SIZE;
   const skip = (currentPage - 1) * limit;
 
   const finalWhere: Prisma.ResourceWhereInput = {
@@ -258,43 +175,18 @@ export async function getPaginatedCategoryResources(
     category: { slug: categorySlug },
   };
 
-  const [resources, total] = await prisma.$transaction([
+  const [resources, total] = await Promise.all([
     prisma.resource.findMany({
       where: finalWhere,
       orderBy,
       skip,
       take: limit,
-      select: {
-        id: true,
-        title: true,
-        author: true,
-        type: true,
-        recommendationReason: true,
-        resourceLink: true,
-        buyLink: true,
-        imageUrl: true,
-        createdAt: true,
-        updatedAt: true,
-        category: {
-          select: {
-            id: true,
-            name: true,
-            slug: true,
-          },
-        },
-        recommendedBy: {
-          select: {
-            id: true,
-            name: true,
-            image: true,
-          },
-        },
-      },
+      select: resourceListSelect,
     }),
     prisma.resource.count({ where: finalWhere }),
   ]);
 
-  const totalPages = Math.ceil(total / limit);
+  const totalPages = Math.max(1, Math.ceil(total / limit));
 
   return {
     resources,
@@ -302,105 +194,4 @@ export async function getPaginatedCategoryResources(
     totalPages,
     currentPage,
   };
-}
-
-export async function getRelatedResources(
-  resourceId: string,
-  limit = 3,
-): Promise<ResourceWithRelations[]> {
-  const resource = await prisma.resource.findUnique({
-    where: { id: resourceId },
-    select: { categoryId: true, type: true },
-  });
-
-  if (!resource) {
-    return [];
-  }
-
-  // 1. Fetch same category and same type first (excluding current)
-  const sameTypeResources = await prisma.resource.findMany({
-    where: {
-      categoryId: resource.categoryId,
-      type: resource.type,
-      NOT: { id: resourceId },
-    },
-    take: limit,
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      title: true,
-      author: true,
-      type: true,
-      recommendationReason: true,
-      resourceLink: true,
-      buyLink: true,
-      imageUrl: true,
-      createdAt: true,
-      updatedAt: true,
-      category: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-        },
-      },
-      recommendedBy: {
-        select: {
-          id: true,
-          name: true,
-          image: true,
-        },
-      },
-    },
-  });
-
-  if (sameTypeResources.length >= limit) {
-    return sameTypeResources;
-  }
-
-  // 2. Fetch other types in same category to fill remaining slots
-  const remainingLimit = limit - sameTypeResources.length;
-  const otherTypeResources = await prisma.resource.findMany({
-    where: {
-      categoryId: resource.categoryId,
-      NOT: {
-        id: { in: [resourceId, ...sameTypeResources.map((r) => r.id)] },
-      },
-    },
-    take: remainingLimit,
-    orderBy: { createdAt: "desc" },
-    select: {
-      id: true,
-      title: true,
-      author: true,
-      type: true,
-      recommendationReason: true,
-      resourceLink: true,
-      buyLink: true,
-      imageUrl: true,
-      createdAt: true,
-      updatedAt: true,
-      category: {
-        select: {
-          id: true,
-          name: true,
-          slug: true,
-        },
-      },
-      recommendedBy: {
-        select: {
-          id: true,
-          name: true,
-          image: true,
-        },
-      },
-    },
-  });
-
-  return [...sameTypeResources, ...otherTypeResources];
-}
-
-export async function searchResources(query: string): Promise<ResourceWithRelations[]> {
-  const result = await getPaginatedResources({ q: query, limit: 100 });
-  return result.resources;
 }

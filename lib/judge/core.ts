@@ -1,4 +1,4 @@
-import { SubmissionVerdict } from "@prisma/client";
+import { SubmissionVerdict } from "@/prisma-client";
 import type { CodeExecutor, JudgeResult, JudgeTestCase } from "./types";
 import type { SupportedLanguage } from "./languages";
 
@@ -56,6 +56,8 @@ export async function judgeSubmission({
 }): Promise<JudgeResult> {
   let passedCount = 0;
   let runtimeMs = 0;
+  let verdict: SubmissionVerdict = SubmissionVerdict.ACCEPTED;
+  let failureMessage: string | null = null;
 
   for (const testCase of testCases) {
     const result = await executor({ language, code, stdin: testCase.input, timeLimitMs });
@@ -75,40 +77,33 @@ export async function judgeSubmission({
     }
 
     if (result.timedOut || result.signal === "SIGKILL" || result.signal === "SIGTERM") {
-      return {
-        verdict: SubmissionVerdict.TLE,
-        passedCount,
-        totalCount: testCases.length,
-        runtimeMs,
-      };
+      verdict = SubmissionVerdict.TLE;
+      continue;
     }
 
     if (result.exitCode !== 0) {
-      return {
-        verdict: SubmissionVerdict.RUNTIME_ERROR,
-        passedCount,
-        totalCount: testCases.length,
-        runtimeMs,
-        failureMessage: runtimeFailureMessage(result, testCase.isSample),
-      };
+      if (verdict !== SubmissionVerdict.TLE) {
+        verdict = SubmissionVerdict.RUNTIME_ERROR;
+      }
+      failureMessage ??= runtimeFailureMessage(result, testCase.isSample);
+      continue;
     }
 
     if (normalizeOutput(result.stdout) !== normalizeOutput(testCase.expectedOutput)) {
-      return {
-        verdict: SubmissionVerdict.WRONG_ANSWER,
-        passedCount,
-        totalCount: testCases.length,
-        runtimeMs,
-      };
+      if (verdict === SubmissionVerdict.ACCEPTED) {
+        verdict = SubmissionVerdict.WRONG_ANSWER;
+      }
+      continue;
     }
 
     passedCount += 1;
   }
 
   return {
-    verdict: SubmissionVerdict.ACCEPTED,
+    verdict,
     passedCount,
     totalCount: testCases.length,
     runtimeMs,
+    failureMessage,
   };
 }
