@@ -1,4 +1,4 @@
-import { ResourceType } from "@prisma/client";
+import { ResourceType } from "@/prisma-client";
 import { notFound } from "next/navigation";
 import { requireAdmin } from "../../../../../../lib/auth/admin";
 import { prisma } from "../../../../../../lib/prisma";

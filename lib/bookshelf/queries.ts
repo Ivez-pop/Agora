@@ -63,13 +63,16 @@ export async function getRecentResources(limit: number = 6) {
   });
 }
 
-export async function getCategoryBySlug(slug: string) {
+export async function getCategoryBySlug(slug: string): Promise<CategoryWithCount | null> {
   return prisma.category.findUnique({
     where: { slug },
     select: {
       id: true,
       name: true,
       slug: true,
+      _count: {
+        select: { resources: true },
+      },
     },
   });
 }
@@ -194,4 +197,52 @@ export async function getPaginatedCategoryResources(
     totalPages,
     currentPage,
   };
+}
+
+export async function getRelatedResources(resourceId: string, limit = 3): Promise<ResourceList[]> {
+  const resource = await prisma.resource.findUnique({
+    where: { id: resourceId },
+    select: { categoryId: true, type: true },
+  });
+
+  if (!resource) {
+    return [];
+  }
+
+  // 1. Fetch same category and same type first (excluding current)
+  const sameTypeResources = await prisma.resource.findMany({
+    where: {
+      categoryId: resource.categoryId,
+      type: resource.type,
+      NOT: { id: resourceId },
+    },
+    take: limit,
+    orderBy: { createdAt: "desc" },
+    select: resourceListSelect,
+  });
+
+  if (sameTypeResources.length >= limit) {
+    return sameTypeResources;
+  }
+
+  // 2. Fetch other types in same category to fill remaining slots
+  const remainingLimit = limit - sameTypeResources.length;
+  const otherTypeResources = await prisma.resource.findMany({
+    where: {
+      categoryId: resource.categoryId,
+      NOT: {
+        id: { in: [resourceId, ...sameTypeResources.map((r) => r.id)] },
+      },
+    },
+    take: remainingLimit,
+    orderBy: { createdAt: "desc" },
+    select: resourceListSelect,
+  });
+
+  return [...sameTypeResources, ...otherTypeResources];
+}
+
+export async function searchResources(query: string): Promise<ResourceList[]> {
+  const result = await getPaginatedResources({ q: query, limit: 100 });
+  return result.resources;
 }

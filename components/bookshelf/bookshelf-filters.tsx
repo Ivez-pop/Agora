@@ -1,7 +1,7 @@
 "use client";
 
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
-import { ResourceType } from "@prisma/client";
+import { ResourceType } from "@/prisma-client";
 
 const TYPE_LABELS: Record<string, string> = {
   BOOK: "Books",

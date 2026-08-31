@@ -67,6 +67,25 @@ try {
       },
     },
   });
+  await prisma.category.deleteMany({ where: { slug: "system-design" } });
+  await prisma.category.create({
+    data: {
+      name: "System Design",
+      slug: "system-design",
+      resources: {
+        create: [
+          {
+            title: "Designing Data-Intensive Applications",
+            author: "Martin Kleppmann",
+            type: "BOOK",
+            recommendationReason: "Essential reading for distributed systems.",
+            resourceLink: "https://example.com/ddia",
+            imageUrl: "https://example.com/cover.jpg",
+          },
+        ],
+      },
+    },
+  });
 } finally {
   await prisma.$disconnect();
 }
