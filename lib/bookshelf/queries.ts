@@ -195,3 +195,16 @@ export async function getPaginatedCategoryResources(
     currentPage,
   };
 }
+
+export async function searchResources(query: string) {
+  return prisma.resource.findMany({
+    where: {
+      OR: [
+        { title: { contains: query, mode: "insensitive" } },
+        { author: { contains: query, mode: "insensitive" } },
+      ],
+    },
+    select: resourceListSelect,
+  });
+}
+
