@@ -207,4 +207,3 @@ export async function searchResources(query: string) {
     select: resourceListSelect,
   });
 }
-
