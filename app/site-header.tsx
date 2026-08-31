@@ -17,6 +17,7 @@ export default function SiteHeader({
         <a href="/contests">Contests</a>
         <a href="/hireup">HireUp</a>
         <a href="/practice">Practice</a>
+        <a href="/bookshelf">Bookshelf</a>
         {children ?? <a href="/join">Join</a>}
         <ThemeToggle />
       </nav>
