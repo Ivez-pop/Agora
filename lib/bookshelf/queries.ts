@@ -70,6 +70,9 @@ export async function getCategoryBySlug(slug: string) {
       id: true,
       name: true,
       slug: true,
+      _count: {
+        select: { resources: true },
+      },
     },
   });
 }
@@ -207,4 +210,45 @@ export async function searchResources(query: string) {
     select: resourceListSelect,
   });
 }
+
+export async function getRelatedResources(
+  resourceId: string,
+  limit: number = 3,
+): Promise<ResourceList[]> {
+  const currentResource = await prisma.resource.findUnique({
+    where: { id: resourceId },
+    select: { categoryId: true, type: true },
+  });
+
+  if (!currentResource) return [];
+
+  // Query resources in same category and same type first
+  const sameTypeResources = await prisma.resource.findMany({
+    where: {
+      categoryId: currentResource.categoryId,
+      type: currentResource.type,
+      NOT: { id: resourceId },
+    },
+    take: limit,
+    select: resourceListSelect,
+  });
+
+  if (sameTypeResources.length >= limit) {
+    return sameTypeResources;
+  }
+
+  // Backfill remaining from same category
+  const existingIds = [resourceId, ...sameTypeResources.map((r) => r.id)];
+  const categoryResources = await prisma.resource.findMany({
+    where: {
+      categoryId: currentResource.categoryId,
+      NOT: { id: { in: existingIds } },
+    },
+    take: limit - sameTypeResources.length,
+    select: resourceListSelect,
+  });
+
+  return [...sameTypeResources, ...categoryResources];
+}
+
 
